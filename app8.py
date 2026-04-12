@@ -1541,7 +1541,7 @@ def plot_matplotlib(fig):
 
 
 def plot_plotly(fig):
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def make_business_chart(df, chart_type, x_col=None, y_col=None, color_col=None, title=None):
@@ -3432,777 +3432,291 @@ def advanced_model_improving_tips(best_row: pd.Series, results_df: pd.DataFrame,
     return list(dict.fromkeys(tips))[:5]
 
 def show_modeling(df: pd.DataFrame, target: str, business_mode: bool):
-    if target is None or target not in df.columns:
-        st.info("Select a valid target to run modeling.")
-        return None, None
-
-    task_type = infer_task_type(df[target])
-    is_large_data = len(df) > 50000
-
-    all_models = list(model_bank(task_type, is_large_data=is_large_data).keys())
-
-    st.subheader("Model comparison")
-
     try:
-        _, preview_removed = prepare_modeling_dataset(df, target)
-        removed_preview = {
-            "identifier_like_cols": preview_removed.get("identifier_like_cols", []),
-            "leakage_name_cols": preview_removed.get("leakage_name_cols", []),
-            "near_target_cols": preview_removed.get("near_target_cols", []),
-            "constant_cols": preview_removed.get("constant_cols", []),
-        }
-
-        removed_any = any(len(v) > 0 for v in removed_preview.values())
-        if removed_any:
-            with st.expander("Columns removed before modeling", expanded=False):
-                for k, v in removed_preview.items():
-                    if v:
-                        st.write({k: v[:20]})
-    except Exception as e:
-        st.warning(f"Modeling readiness warning: {e}")
-
-    results_df = None
-    best_name = None
-    best_bundle = None
-
-    current_schema_signature = (
-        tuple(df.columns.tolist()),
-        df.shape,
-        target,
-    )
-
-    if business_mode:
-        selected_models = [m for m in get_business_mode_models(task_type, is_large_data) if m in all_models]
-        enable_fs = False
-
-        current_config = {
-            "target": target,
-            "selected_models": tuple(selected_models),
-            "enable_fs": enable_fs,
-            "mode": "business",
-            "schema_signature": current_schema_signature,
-        }
-
-        cached_config = st.session_state.get("business_model_config")
-        cached_result = st.session_state.get("business_model_result")
-
-        if cached_result is not None and cached_config == current_config:
-            task_type, results_df, best_name, best_bundle = cached_result
-            run_models = False
-            st.success(f"Using saved model results: {best_name}")
-        else:
-            run_models = True
-
-    else:
-        st.info(
-            "Technical Mode lets you choose models manually. "
-            "Use the button below to run the selected models."
-        )
-
-        default_models = [m for m in get_business_mode_models(task_type, is_large_data) if m in all_models]
-        if not default_models and all_models:
-            default_models = all_models[: min(3, len(all_models))]
-
-        selected_models = st.multiselect(
-            "Select models",
-            all_models,
-            default=default_models,
-            help="Choose one or more basic models to compare.",
-            key="basic_model_select",
-        )
-
-        with st.expander("What each model is for", expanded=False):
-            for m in all_models:
-                st.markdown(f"- **{m}**: {recommended_model_label(task_type, m)}")
-
-        enable_fs = st.checkbox(
-            "Enable feature selection",
-            value=False,
-            help="Usually keep this off for large or high-cardinality datasets.",
-            key="basic_enable_fs",
-        )
-
-        if not selected_models:
-            st.warning("Select at least one model to continue.")
+        if target is None or target not in df.columns:
+            st.info("Select a valid target to run modeling.")
             return None, None
 
-        run_models = st.button("Run selected models", type="primary", key="run_basic_models")
+        task_type = infer_task_type(df[target])
+        is_large_data = len(df) > 50000
 
-        current_config = {
-            "target": target,
-            "selected_models": tuple(selected_models),
-            "enable_fs": enable_fs,
-            "mode": "technical",
-            "schema_signature": current_schema_signature,
-        }
+        all_models = list(model_bank(task_type, is_large_data=is_large_data).keys())
 
-        cached_config = st.session_state.get("technical_model_config")
-        cached_result = st.session_state.get("technical_model_result")
+        st.subheader("Model comparison")
 
-        if run_models:
-            pass
-        elif cached_result is not None and cached_config == current_config:
-            task_type, results_df, best_name, best_bundle = cached_result
-            st.success(f"Using saved model results: {best_name}")
-        else:
-            st.caption("Choose the models you want, then click **Run selected models**.")
-
-    if run_models:
         try:
-            with st.spinner("Training basic models..."):
-                task_type, results_df, best_name, best_bundle = train_models(
-                    df,
-                    target,
-                    selected_models=selected_models,
-                    enable_feature_selection=enable_fs,
-                )
+            _, preview_removed = prepare_modeling_dataset(df, target)
+            removed_preview = {
+                "identifier_like_cols": preview_removed.get("identifier_like_cols", []),
+                "leakage_name_cols": preview_removed.get("leakage_name_cols", []),
+                "near_target_cols": preview_removed.get("near_target_cols", []),
+                "constant_cols": preview_removed.get("constant_cols", []),
+            }
 
-            if business_mode:
-                st.session_state["business_model_config"] = {
-                    "target": target,
-                    "selected_models": tuple(selected_models),
-                    "enable_fs": enable_fs,
-                    "mode": "business",
-                    "schema_signature": current_schema_signature,
-                }
-                st.session_state["business_model_result"] = (
-                    task_type,
-                    results_df,
-                    best_name,
-                    best_bundle,
-                )
-            else:
-                st.session_state["technical_model_config"] = {
-                    "target": target,
-                    "selected_models": tuple(selected_models),
-                    "enable_fs": enable_fs,
-                    "mode": "technical",
-                    "schema_signature": current_schema_signature,
-                }
-                st.session_state["technical_model_result"] = (
-                    task_type,
-                    results_df,
-                    best_name,
-                    best_bundle,
-                )
-
-        except Exception as e:
-            st.error(f"Modeling failed: {e}")
-            st.info(
-                "Try using a cleaner target, or reduce high-cardinality columns like IDs, names, order numbers, and text-heavy fields."
-            )
-            results_df, best_name, best_bundle = None, None, None
-
-    if results_df is not None and not results_df.empty:
-        st.dataframe(results_df, use_container_width=True)
-
-        if best_name is not None:
-            st.success(f"Recommended model: {best_name}")
-            st.caption(recommended_model_label(task_type, best_name))
-
-        if best_bundle is not None and best_bundle.get("removed_info"):
-            removed_info = best_bundle["removed_info"]
-            removed_total = sum(len(v) for v in removed_info.values())
-            if removed_total > 0:
-                st.caption(f"{removed_total} column(s) were excluded before modeling to reduce leakage and unstable results.")
-
-        if task_type == "regression" and best_bundle is not None:
-            compare_df = pd.DataFrame(
-                {
-                    "Actual": pd.Series(best_bundle["y_test"]).reset_index(drop=True),
-                    "Predicted": pd.Series(best_bundle["pred"]).reset_index(drop=True),
-                }
-            )
-
-            fig, ax = plt.subplots(figsize=(7.5, 5))
-            sns.scatterplot(data=compare_df, x="Actual", y="Predicted", ax=ax)
-            ax.set_title("Actual vs Predicted")
-            plot_matplotlib(fig)
-
-            residuals = compare_df["Actual"] - compare_df["Predicted"]
-            resid_df = pd.DataFrame(
-                {
-                    "Predicted": compare_df["Predicted"],
-                    "Residual": residuals,
-                }
-            )
-
-            resid_fig = px.scatter(resid_df, x="Predicted", y="Residual", title="Residual Plot")
-            resid_fig.add_hline(y=0, line_dash="dash")
-            plot_plotly(resid_fig)
-
-            st.info(residual_interpretation(best_bundle["y_test"], best_bundle["pred"]))
-
-        elif task_type != "regression" and best_bundle is not None:
-            y_true_raw = pd.Series(best_bundle["y_test"]).reset_index(drop=True)
-            y_pred_raw = pd.Series(best_bundle["pred"]).reset_index(drop=True)
-
-            display_labels = sorted(pd.Series(y_true_raw.astype(str)).unique().tolist())
-            y_true = y_true_raw.astype(str)
-            y_pred = y_pred_raw.astype(str)
-
-            cm = metrics.confusion_matrix(y_true, y_pred, labels=display_labels)
-            fig, ax = plt.subplots(figsize=(6.5, 5))
-            sns.heatmap(
-                cm,
-                annot=True,
-                fmt="d",
-                cmap="viridis",
-                ax=ax,
-                xticklabels=display_labels,
-                yticklabels=display_labels,
-            )
-            ax.set_title("Confusion Matrix")
-            ax.set_xlabel("Predicted")
-            ax.set_ylabel("Actual")
-            plot_matplotlib(fig)
-
-    st.markdown("## Advanced Modeling")
-    enable_advanced = st.checkbox("Enable advanced modeling", key="enable_advanced_modeling")
-
-    if enable_advanced:
-        st.info("Advanced Modeling compares stronger models, cross validation stability, diagnostics, and explainability.")
-
-        adv_models = get_advanced_models(task_type)
-        default_reg = [
-            "Linear Regression",
-            "Ridge",
-            "Random Forest Regressor",
-        ]
-        default_cls = [
-            "Logistic Regression",
-            "Random Forest Classifier",
-        ]
-
-        selected_adv_models = st.multiselect(
-            "Advanced models to compare",
-            list(adv_models.keys()),
-            default=default_reg if task_type == "regression" else default_cls,
-            key="adv_model_select",
-        )
-
-        test_size = st.slider("Test size", 0.1, 0.4, 0.2, 0.05, key="adv_test_size")
-        cv_folds = st.selectbox("CV folds", [3, 5, 10], index=0, key="adv_cv_folds")
-        random_state = st.number_input("Random state", min_value=1, value=42, step=1, key="adv_random_state")
-        enable_tuning = st.checkbox("Enable hyperparameter tuning", value=False, key="adv_enable_tuning")
-        run_advanced = st.button("Run Advanced Analysis", type="primary", key="run_advanced_analysis")
-
-        advanced_config = {
-            "target": target,
-            "task_type": task_type,
-            "selected_adv_models": tuple(selected_adv_models),
-            "test_size": float(test_size),
-            "cv_folds": int(cv_folds),
-            "random_state": int(random_state),
-            "enable_tuning": bool(enable_tuning),
-            "schema_signature": current_schema_signature,
-        }
-
-        cached_adv_config = st.session_state.get("advanced_model_config")
-        cached_adv_result = st.session_state.get("advanced_model_result")
-
-        if run_advanced:
-            pass
-        elif cached_adv_result is not None and cached_adv_config == advanced_config:
-            adv_results_df, best_adv_name, best_adv_row, best_adv_bundle, readiness, valid_adv = cached_adv_result
-        else:
-            adv_results_df, best_adv_name, best_adv_row, best_adv_bundle, readiness, valid_adv = None, None, None, None, None, None
-
-        if run_advanced:
-            work, adv_removed_info = prepare_modeling_dataset(df, target)
-
-            if work.empty:
-                st.warning("No usable rows remain after removing leakage and missing target.")
-                return results_df, best_name
-
-            X_raw = work.drop(columns=[target]).copy()
-            y = work[target].copy()
-
-            if task_type == "regression":
-                y = safe_numeric(y)
-                valid_mask = y.notna()
-                X_raw = X_raw.loc[valid_mask].copy()
-                y = y.loc[valid_mask].copy()
-
-                if y.empty:
-                    st.warning("Advanced regression requires a numeric target.")
-                    return results_df, best_name
-
-            def prepare_advanced_features(frame: pd.DataFrame, reference_columns=None) -> pd.DataFrame:
-                out = frame.copy()
-
-                datetime_features = [c for c in out.columns if pd.api.types.is_datetime64_any_dtype(out[c])]
-                for col in datetime_features:
-                    out[f"{col}_year"] = out[col].dt.year
-                    out[f"{col}_month"] = out[col].dt.month
-                    out[f"{col}_day"] = out[col].dt.day
-                    out[f"{col}_dayofweek"] = out[col].dt.dayofweek
-
-                out = out.drop(columns=datetime_features, errors="ignore")
-
-                if reference_columns is not None:
-                    out = out.reindex(columns=reference_columns, fill_value=np.nan)
-
-                return out
-
-            X_ready = prepare_advanced_features(X_raw)
-
-            constant_cols_ready = [
-                c for c in X_ready.columns
-                if X_ready[c].nunique(dropna=True) <= 1
-            ]
-            if constant_cols_ready:
-                X_ready = X_ready.drop(columns=constant_cols_ready, errors="ignore")
-
-            if X_ready.empty or X_ready.shape[1] == 0:
-                st.warning("No usable predictors remain for advanced modeling.")
-                return results_df, best_name
-
-            readiness_df = X_ready.copy()
-            readiness_df[target] = y.values
-            readiness = run_data_readiness_checks(readiness_df, target)
-
-            st.markdown("### Data Readiness Check")
-            st.write({
-                "rows": readiness["rows"],
-                "columns": readiness["columns"],
-                "numeric_features": readiness["numeric_count"],
-                "categorical_features": readiness["categorical_count"],
-                "duplicate_rows": readiness["duplicate_rows"],
-                "constant_columns": readiness["constant_cols"][:10],
-            })
-
-            removed_total = sum(len(v) for v in adv_removed_info.values())
-            if removed_total > 0:
-                with st.expander("Columns removed before advanced modeling", expanded=False):
-                    for k, v in adv_removed_info.items():
+            removed_any = any(len(v) > 0 for v in removed_preview.values())
+            if removed_any:
+                with st.expander("Columns removed before modeling", expanded=False):
+                    for k, v in removed_preview.items():
                         if v:
                             st.write({k: v[:20]})
+        except Exception as e:
+            st.warning(f"Modeling readiness warning: {e}")
 
-            if not readiness["missing_summary"].empty:
-                with st.expander("Columns with missing values", expanded=False):
-                    missing_df = readiness["missing_summary"].reset_index()
-                    missing_df.columns = ["column", "missing_count"]
-                    st.dataframe(missing_df, use_container_width=True)
+        results_df = None
+        best_name = None
+        best_bundle = None
 
-            if readiness["high_corr_pairs"]:
-                with st.expander("Highly correlated numeric features", expanded=False):
-                    corr_df = pd.DataFrame(
-                        readiness["high_corr_pairs"],
-                        columns=["Feature A", "Feature B", "Correlation"],
+        current_schema_signature = (
+            tuple(df.columns.tolist()),
+            df.shape,
+            target,
+        )
+
+        if business_mode:
+            selected_models = [m for m in get_business_mode_models(task_type, is_large_data) if m in all_models]
+            enable_fs = False
+
+            current_config = {
+                "target": target,
+                "selected_models": tuple(selected_models),
+                "enable_fs": enable_fs,
+                "mode": "business",
+                "schema_signature": current_schema_signature,
+            }
+
+            cached_config = st.session_state.get("business_model_config")
+            cached_result = st.session_state.get("business_model_result")
+
+            if cached_result is not None and cached_config == current_config:
+                task_type, results_df, best_name, best_bundle = cached_result
+                run_models = False
+                st.success(f"Using saved model results: {best_name}")
+            else:
+                run_models = True
+
+        else:
+            st.info(
+                "Technical Mode lets you choose models manually. "
+                "Use the button below to run the selected models."
+            )
+
+            default_models = [m for m in get_business_mode_models(task_type, is_large_data) if m in all_models]
+            if not default_models and all_models:
+                default_models = all_models[: min(3, len(all_models))]
+
+            selected_models = st.multiselect(
+                "Select models",
+                all_models,
+                default=default_models,
+                help="Choose one or more basic models to compare.",
+                key="basic_model_select",
+            )
+
+            with st.expander("What each model is for", expanded=False):
+                for m in all_models:
+                    st.markdown(f"- **{m}**: {recommended_model_label(task_type, m)}")
+
+            enable_fs = st.checkbox(
+                "Enable feature selection",
+                value=False,
+                help="Usually keep this off for large or high-cardinality datasets.",
+                key="basic_enable_fs",
+            )
+
+            if not selected_models:
+                st.warning("Select at least one model to continue.")
+                return None, None
+
+            run_models = st.button("Run selected models", type="primary", key="run_basic_models")
+
+            current_config = {
+                "target": target,
+                "selected_models": tuple(selected_models),
+                "enable_fs": enable_fs,
+                "mode": "technical",
+                "schema_signature": current_schema_signature,
+            }
+
+            cached_config = st.session_state.get("technical_model_config")
+            cached_result = st.session_state.get("technical_model_result")
+
+            if run_models:
+                pass
+            elif cached_result is not None and cached_config == current_config:
+                task_type, results_df, best_name, best_bundle = cached_result
+                st.success(f"Using saved model results: {best_name}")
+            else:
+                st.caption("Choose the models you want, then click **Run selected models**.")
+
+        if run_models:
+            try:
+                with st.spinner("Training basic models..."):
+                    task_type, results_df, best_name, best_bundle = train_models(
+                        df,
+                        target,
+                        selected_models=selected_models,
+                        enable_feature_selection=enable_fs,
                     )
-                    st.dataframe(corr_df, use_container_width=True)
 
-            for w in readiness["warnings"]:
-                st.warning(w)
-
-            stratify = None
-            if task_type == "classification":
-                vc = y.value_counts(dropna=True)
-                if len(vc) > 1 and vc.min() >= 2:
-                    stratify = y
-
-            X_train, X_test, y_train, y_test = train_test_split(
-                X_ready,
-                y,
-                test_size=test_size,
-                random_state=int(random_state),
-                stratify=stratify,
-            )
-
-            adv_results = []
-            fitted_adv = {}
-            param_grids = get_advanced_param_grids(task_type)
-
-            row_count = len(X_train)
-            feature_count = X_train.shape[1]
-
-            effective_cv_folds = min(int(cv_folds), 3) if (row_count > 5000 or feature_count > 40) else int(cv_folds)
-
-            for model_name in selected_adv_models:
-                model = adv_models[model_name]
-
-                try:
-                    X_train_ready = X_train.copy()
-                    X_test_ready = prepare_advanced_features(X_test.copy(), reference_columns=X_train_ready.columns)
-
-                    preprocessor, _, _, _ = build_preprocessor(X_train_ready)
-
-                    pipe = Pipeline([
-                        ("preprocessor", preprocessor),
-                        ("model", model),
-                    ])
-
-                    if row_count > 6000:
-                        sample_n = min(4000, row_count)
-                        sample_idx = X_train_ready.sample(sample_n, random_state=int(random_state)).index
-                        X_cv = X_train_ready.loc[sample_idx].copy()
-                        y_cv = y_train.loc[sample_idx].copy()
-                    else:
-                        X_cv = X_train_ready
-                        y_cv = y_train
-
-                    cv_mean = np.nan
-                    cv_std = np.nan
-
-                    if enable_tuning and model_name in param_grids:
-                        scoring_name = "r2" if task_type == "regression" else "f1_weighted"
-                        search = GridSearchCV(
-                            pipe,
-                            param_grid=param_grids[model_name],
-                            cv=effective_cv_folds,
-                            scoring=scoring_name,
-                            n_jobs=1,
-                        )
-                        search.fit(X_cv, y_cv)
-                        fitted_pipe = search.best_estimator_
-                        cv_mean = float(search.best_score_)
-                        cv_std = np.nan
-
-                        if len(X_cv) != len(X_train_ready):
-                            fitted_pipe.fit(X_train_ready, y_train)
-                    else:
-                        fitted_pipe = pipe.fit(X_train_ready, y_train)
-
-                        if task_type == "regression":
-                            cv_scores = cross_val_score(
-                                pipe,
-                                X_cv,
-                                y_cv,
-                                cv=effective_cv_folds,
-                                scoring="r2",
-                                n_jobs=1,
-                            )
-                        else:
-                            cv_scores = cross_val_score(
-                                pipe,
-                                X_cv,
-                                y_cv,
-                                cv=effective_cv_folds,
-                                scoring="f1_weighted",
-                                n_jobs=1,
-                            )
-
-                        cv_mean = float(np.mean(cv_scores))
-                        cv_std = float(np.std(cv_scores))
-
-                    train_pred = fitted_pipe.predict(X_train_ready)
-                    test_pred = fitted_pipe.predict(X_test_ready)
-
-                    if task_type == "regression":
-                        train_r2 = float(metrics.r2_score(y_train, train_pred))
-                        test_r2 = float(metrics.r2_score(y_test, test_pred))
-                        mae = float(metrics.mean_absolute_error(y_test, test_pred))
-                        rmse = float(np.sqrt(metrics.mean_squared_error(y_test, test_pred)))
-
-                        overfit_gap = train_r2 - test_r2
-                        overfit_flag = "Yes" if overfit_gap > 0.15 else "No"
-                        stability_note = "Stable" if pd.isna(cv_std) or cv_std <= 0.10 else "Unstable"
-
-                        adv_results.append({
-                            "Model": model_name,
-                            "Train R2": train_r2,
-                            "Test R2": test_r2,
-                            "MAE": mae,
-                            "RMSE": rmse,
-                            "CV Mean": cv_mean,
-                            "CV Std": cv_std,
-                            "Overfitting Gap": overfit_gap,
-                            "Overfitting Flag": overfit_flag,
-                            "Stability": stability_note,
-                        })
-
-                    else:
-                        train_acc = float(metrics.accuracy_score(y_train, train_pred))
-                        test_acc = float(metrics.accuracy_score(y_test, test_pred))
-                        precision = float(metrics.precision_score(y_test, test_pred, average="weighted", zero_division=0))
-                        recall = float(metrics.recall_score(y_test, test_pred, average="weighted", zero_division=0))
-                        f1 = float(metrics.f1_score(y_test, test_pred, average="weighted", zero_division=0))
-
-                        overfit_gap = train_acc - test_acc
-                        overfit_flag = "Yes" if overfit_gap > 0.10 else "No"
-                        stability_note = "Stable" if pd.isna(cv_std) or cv_std <= 0.10 else "Unstable"
-
-                        adv_results.append({
-                            "Model": model_name,
-                            "Train Accuracy": train_acc,
-                            "Test Accuracy": test_acc,
-                            "Precision": precision,
-                            "Recall": recall,
-                            "F1": f1,
-                            "CV Mean": cv_mean,
-                            "CV Std": cv_std,
-                            "Overfitting Gap": overfit_gap,
-                            "Overfitting Flag": overfit_flag,
-                            "Stability": stability_note,
-                        })
-
-                    fitted_adv[model_name] = {
-                        "pipeline": fitted_pipe,
-                        "y_test": y_test,
-                        "pred": test_pred,
-                        "X_train": X_train_ready,
-                        "X_test": X_test_ready,
+                if business_mode:
+                    st.session_state["business_model_config"] = {
+                        "target": target,
+                        "selected_models": tuple(selected_models),
+                        "enable_fs": enable_fs,
+                        "mode": "business",
+                        "schema_signature": current_schema_signature,
                     }
-
-                except Exception as e:
-                    if task_type == "regression":
-                        adv_results.append({
-                            "Model": model_name,
-                            "Train R2": np.nan,
-                            "Test R2": np.nan,
-                            "MAE": np.nan,
-                            "RMSE": np.nan,
-                            "CV Mean": np.nan,
-                            "CV Std": np.nan,
-                            "Overfitting Gap": np.nan,
-                            "Overfitting Flag": f"Failed: {e}",
-                            "Stability": "Unknown",
-                        })
-                    else:
-                        adv_results.append({
-                            "Model": model_name,
-                            "Train Accuracy": np.nan,
-                            "Test Accuracy": np.nan,
-                            "Precision": np.nan,
-                            "Recall": np.nan,
-                            "F1": np.nan,
-                            "CV Mean": np.nan,
-                            "CV Std": np.nan,
-                            "Overfitting Gap": np.nan,
-                            "Overfitting Flag": f"Failed: {e}",
-                            "Stability": "Unknown",
-                        })
-
-            adv_results_df = pd.DataFrame(adv_results)
-
-            valid_cols = ["CV Mean"]
-            valid_cols.append("RMSE" if task_type == "regression" else "F1")
-            valid_adv = adv_results_df.dropna(subset=valid_cols, how="any").copy()
-
-            if valid_adv.empty:
-                best_adv_name, best_adv_row, best_adv_bundle = None, None, None
-            else:
-                best_adv_name = select_best_advanced_model(valid_adv, task_type)
-                best_adv_row = valid_adv[valid_adv["Model"] == best_adv_name].iloc[0]
-                best_adv_bundle = fitted_adv[best_adv_name]
-
-            st.session_state["advanced_model_config"] = advanced_config
-            st.session_state["advanced_model_result"] = (
-                adv_results_df,
-                best_adv_name,
-                best_adv_row,
-                best_adv_bundle,
-                readiness,
-                valid_adv,
-            )
-
-        if readiness is not None:
-            st.markdown("### Model Comparison")
-            st.dataframe(adv_results_df, use_container_width=True)
-
-            if best_adv_name is None:
-                st.warning("No advanced models completed successfully.")
-            else:
-                st.success(f"Best Model: {best_adv_name}")
-
-                st.markdown("### Best Model Summary")
-                if task_type == "regression":
-                    st.write({
-                        "Model": best_adv_name,
-                        "Train R2": round(float(best_adv_row["Train R2"]), 4),
-                        "Test R2": round(float(best_adv_row["Test R2"]), 4),
-                        "MAE": round(float(best_adv_row["MAE"]), 4),
-                        "RMSE": round(float(best_adv_row["RMSE"]), 4),
-                        "CV Mean": round(float(best_adv_row["CV Mean"]), 4),
-                        "CV Std": None if pd.isna(best_adv_row["CV Std"]) else round(float(best_adv_row["CV Std"]), 4),
-                        "Overfitting Gap": round(float(best_adv_row["Overfitting Gap"]), 4),
-                        "Overfitting Flag": best_adv_row["Overfitting Flag"],
-                        "Stability": best_adv_row["Stability"],
-                    })
+                    st.session_state["business_model_result"] = (
+                        task_type,
+                        results_df,
+                        best_name,
+                        best_bundle,
+                    )
                 else:
-                    st.write({
-                        "Model": best_adv_name,
-                        "Train Accuracy": round(float(best_adv_row["Train Accuracy"]), 4),
-                        "Test Accuracy": round(float(best_adv_row["Test Accuracy"]), 4),
-                        "Precision": round(float(best_adv_row["Precision"]), 4),
-                        "Recall": round(float(best_adv_row["Recall"]), 4),
-                        "F1": round(float(best_adv_row["F1"]), 4),
-                        "CV Mean": round(float(best_adv_row["CV Mean"]), 4),
-                        "CV Std": None if pd.isna(best_adv_row["CV Std"]) else round(float(best_adv_row["CV Std"]), 4),
-                        "Overfitting Gap": round(float(best_adv_row["Overfitting Gap"]), 4),
-                        "Overfitting Flag": best_adv_row["Overfitting Flag"],
-                        "Stability": best_adv_row["Stability"],
-                    })
+                    st.session_state["technical_model_config"] = {
+                        "target": target,
+                        "selected_models": tuple(selected_models),
+                        "enable_fs": enable_fs,
+                        "mode": "technical",
+                        "schema_signature": current_schema_signature,
+                    }
+                    st.session_state["technical_model_result"] = (
+                        task_type,
+                        results_df,
+                        best_name,
+                        best_bundle,
+                    )
 
-                compare_df = pd.DataFrame({
-                    "Actual": pd.Series(best_adv_bundle["y_test"]).reset_index(drop=True),
-                    "Predicted": pd.Series(best_adv_bundle["pred"]).reset_index(drop=True),
-                })
+            except Exception as e:
+                st.error(f"Modeling failed: {e}")
+                st.exception(e)
+                st.info(
+                    "Try using a cleaner target, or reduce high-cardinality columns like IDs, names, order numbers, and text-heavy fields."
+                )
+                results_df, best_name, best_bundle = None, None, None
 
-                st.markdown("### Diagnostic Plots")
+        if results_df is not None and not results_df.empty:
+            st.dataframe(results_df, width="stretch")
 
-                if task_type == "regression":
-                    fig, ax = plt.subplots(figsize=(7.5, 5))
-                    sns.scatterplot(data=compare_df, x="Actual", y="Predicted", ax=ax)
-                    min_val = min(compare_df["Actual"].min(), compare_df["Predicted"].min())
-                    max_val = max(compare_df["Actual"].max(), compare_df["Predicted"].max())
-                    ax.plot([min_val, max_val], [min_val, max_val])
-                    ax.set_title("Actual vs Predicted")
-                    plot_matplotlib(fig)
+            if best_name is not None:
+                st.success(f"Recommended model: {best_name}")
+                st.caption(recommended_model_label(task_type, best_name))
 
-                    residuals = compare_df["Actual"] - compare_df["Predicted"]
-                    resid_df = pd.DataFrame({
+            if best_bundle is not None and best_bundle.get("removed_info"):
+                removed_info = best_bundle["removed_info"]
+                removed_total = sum(len(v) for v in removed_info.values())
+                if removed_total > 0:
+                    st.caption(f"{removed_total} column(s) were excluded before modeling to reduce leakage and unstable results.")
+
+            if task_type == "regression" and best_bundle is not None:
+                compare_df = pd.DataFrame(
+                    {
+                        "Actual": pd.Series(best_bundle["y_test"]).reset_index(drop=True),
+                        "Predicted": pd.Series(best_bundle["pred"]).reset_index(drop=True),
+                    }
+                )
+
+                fig, ax = plt.subplots(figsize=(7.5, 5))
+                sns.scatterplot(data=compare_df, x="Actual", y="Predicted", ax=ax)
+                ax.set_title("Actual vs Predicted")
+                plot_matplotlib(fig)
+
+                residuals = compare_df["Actual"] - compare_df["Predicted"]
+                resid_df = pd.DataFrame(
+                    {
                         "Predicted": compare_df["Predicted"],
                         "Residual": residuals,
-                    })
+                    }
+                )
 
-                    resid_fig = px.scatter(resid_df, x="Predicted", y="Residual", title="Residual Plot")
-                    resid_fig.add_hline(y=0, line_dash="dash")
-                    plot_plotly(resid_fig)
+                resid_fig = px.scatter(resid_df, x="Predicted", y="Residual", title="Residual Plot")
+                resid_fig.add_hline(y=0, line_dash="dash")
+                plot_plotly(resid_fig)
 
-                    fig, ax = plt.subplots(figsize=(7, 4))
-                    sns.histplot(residuals, kde=True, ax=ax)
-                    ax.set_title("Residual Distribution")
-                    plot_matplotlib(fig)
+                st.info(residual_interpretation(best_bundle["y_test"], best_bundle["pred"]))
 
-                else:
-                    labels = sorted(pd.Series(best_adv_bundle["y_test"]).astype(str).unique().tolist())
-                    cm = confusion_matrix(
-                        pd.Series(best_adv_bundle["y_test"]).astype(str),
-                        pd.Series(best_adv_bundle["pred"]).astype(str),
-                        labels=labels,
-                    )
-                    fig, ax = plt.subplots(figsize=(6.5, 5))
-                    sns.heatmap(cm, annot=True, fmt="d", cmap="viridis", ax=ax, xticklabels=labels, yticklabels=labels)
-                    ax.set_title("Confusion Matrix")
-                    ax.set_xlabel("Predicted")
-                    ax.set_ylabel("Actual")
-                    plot_matplotlib(fig)
+            elif task_type != "regression" and best_bundle is not None:
+                y_true_raw = pd.Series(best_bundle["y_test"]).reset_index(drop=True)
+                y_pred_raw = pd.Series(best_bundle["pred"]).reset_index(drop=True)
 
-                    report = classification_report(
-                        best_adv_bundle["y_test"],
-                        best_adv_bundle["pred"],
-                        output_dict=True,
-                        zero_division=0,
-                    )
-                    report_df = pd.DataFrame(report).transpose().reset_index().rename(columns={"index": "class"})
-                    st.dataframe(report_df, use_container_width=True)
+                display_labels = sorted(pd.Series(y_true_raw.astype(str)).unique().tolist())
+                y_true = y_true_raw.astype(str)
+                y_pred = y_pred_raw.astype(str)
 
-                st.markdown("### Model Explainability")
-                try:
-                    fitted_model = best_adv_bundle["pipeline"].named_steps["model"]
-                    fitted_preprocessor = best_adv_bundle["pipeline"].named_steps["preprocessor"]
+                cm = metrics.confusion_matrix(y_true, y_pred, labels=display_labels)
+                fig, ax = plt.subplots(figsize=(6.5, 5))
+                sns.heatmap(
+                    cm,
+                    annot=True,
+                    fmt="d",
+                    cmap="viridis",
+                    ax=ax,
+                    xticklabels=display_labels,
+                    yticklabels=display_labels,
+                )
+                ax.set_title("Confusion Matrix")
+                ax.set_xlabel("Predicted")
+                ax.set_ylabel("Actual")
+                plot_matplotlib(fig)
 
-                    X_train_source = best_adv_bundle["X_train"]
-                    numeric_features = X_train_source.select_dtypes(include=[np.number]).columns.tolist()
-                    categorical_features = [c for c in X_train_source.columns if c not in numeric_features]
+        st.markdown("## Advanced Modeling")
+        enable_advanced = st.checkbox("Enable advanced modeling", key="enable_advanced_modeling")
 
-                    feature_names = get_feature_names(
-                        fitted_preprocessor,
-                        numeric_features,
-                        categorical_features,
-                    )
+        if enable_advanced:
+            st.info("Advanced Modeling compares stronger models, cross validation stability, diagnostics, and explainability.")
+            st.caption("Keep advanced modeling off unless you need it. It is heavier than the basic model comparison.")
 
-                    if hasattr(fitted_model, "coef_"):
-                        coef_raw = np.array(fitted_model.coef_)
-
-                        if coef_raw.ndim == 1:
-                            coef_vals = coef_raw
-                        else:
-                            coef_vals = np.mean(np.abs(coef_raw), axis=0)
-
-                        feature_count = min(len(feature_names), len(coef_vals))
-
-                        exp_df = pd.DataFrame({
-                            "feature": feature_names[:feature_count],
-                            "coefficient": coef_vals[:feature_count],
-                            "abs_coefficient": np.abs(coef_vals[:feature_count]),
-                        }).sort_values("abs_coefficient", ascending=False).head(15)
-
-                        st.dataframe(exp_df, use_container_width=True)
-
-                        fig, ax = plt.subplots(figsize=(9, 5))
-                        sns.barplot(data=exp_df, x="abs_coefficient", y="feature", ax=ax)
-                        ax.set_title("Top Coefficients")
-                        plot_matplotlib(fig)
-
-                    elif hasattr(fitted_model, "feature_importances_"):
-                        imp_vals = np.array(fitted_model.feature_importances_)
-                        feature_count = min(len(feature_names), len(imp_vals))
-
-                        exp_df = pd.DataFrame({
-                            "feature": feature_names[:feature_count],
-                            "importance": imp_vals[:feature_count],
-                        }).sort_values("importance", ascending=False).head(15)
-
-                        st.dataframe(exp_df, use_container_width=True)
-
-                        fig, ax = plt.subplots(figsize=(9, 5))
-                        sns.barplot(data=exp_df, x="importance", y="feature", ax=ax)
-                        ax.set_title("Top Feature Importances")
-                        plot_matplotlib(fig)
+        if results_df is not None and best_name is not None:
+            with st.expander("Statistical summary", expanded=False):
+                run_stats_summary = st.button("Generate statistical summary", key="run_stats_summary_btn")
+                if run_stats_summary:
+                    sm_table, sm_error = statsmodels_summary(df, target, task_type)
+                    if sm_table is not None:
+                        st.dataframe(sm_table, width="stretch", height=320)
                     else:
-                        st.info("Feature explainability is not available for this model.")
+                        st.info(sm_error)
+                else:
+                    st.caption("Click only when you need the statistical summary.")
 
-                except Exception as e:
-                    st.warning(f"Explainability could not be generated: {e}")
+            with st.expander("Custom test builder", expanded=False):
+                enable_custom_tests = st.checkbox("Enable custom tests", key="enable_custom_tests_block")
+                if enable_custom_tests:
+                    run_custom_test_builder(df)
+                else:
+                    st.caption("Turn this on only when you want to run extra tests.")
 
-                st.markdown("### Interpretation")
-                for note in advanced_model_interpretation(best_adv_row, valid_adv, task_type):
-                    st.markdown(f"- {note}")
+            with st.expander("Advanced feature importance", expanded=False):
+                run_expensive_importance = st.button(
+                    "Generate feature importance and SHAP",
+                    key="run_expensive_importance_btn",
+                )
+                if run_expensive_importance and best_bundle is not None:
+                    show_permutation_importance(best_bundle)
+                    show_shap(best_bundle, best_name)
+                elif best_bundle is not None:
+                    st.caption("Click the button only when you want to compute these expensive diagnostics.")
 
-                st.markdown("### Improvement Tips")
-                for tip in advanced_model_improving_tips(best_adv_row, valid_adv, readiness, task_type):
+            st.markdown("### Improving tips")
+            if best_bundle is not None:
+                for tip in model_improving_tips(
+                    task_type,
+                    best_name,
+                    results_df=results_df,
+                    y_true=best_bundle["y_test"],
+                    y_pred=best_bundle["pred"],
+                ):
                     st.markdown(f"- {tip}")
 
-    if results_df is not None and best_name is not None:
-        with st.expander("Statistical summary", expanded=False):
-            run_stats_summary = st.button("Generate statistical summary", key="run_stats_summary_btn")
-            if run_stats_summary:
-                sm_table, sm_error = statsmodels_summary(df, target, task_type)
-                if sm_table is not None:
-                    st.dataframe(sm_table, use_container_width=True, height=320)
-                else:
-                    st.info(sm_error)
-            else:
-                st.caption("Click only when you need the statistical summary.")
+            st.markdown("### Connected business insights")
+            for item in build_key_insights(df, target, best_name):
+                st.markdown(f"- {item}")
 
-        with st.expander("Custom test builder", expanded=False):
-            enable_custom_tests = st.checkbox("Enable custom tests", key="enable_custom_tests_block")
-            if enable_custom_tests:
-                run_custom_test_builder(df)
-            else:
-                st.caption("Turn this on only when you want to run extra tests.")
+        return results_df, best_name
 
-        with st.expander("Advanced feature importance", expanded=False):
-            run_expensive_importance = st.button(
-                "Generate feature importance and SHAP",
-                key="run_expensive_importance_btn",
-            )
-            if run_expensive_importance and best_bundle is not None:
-                show_permutation_importance(best_bundle)
-                show_shap(best_bundle, best_name)
-            elif best_bundle is not None:
-                st.caption("Click the button only when you want to compute these expensive diagnostics.")
-
-        st.markdown("### Improving tips")
-        if best_bundle is not None:
-            for tip in model_improving_tips(
-                task_type,
-                best_name,
-                results_df=results_df,
-                y_true=best_bundle["y_test"],
-                y_pred=best_bundle["pred"],
-            ):
-                st.markdown(f"- {tip}")
-
-        st.markdown("### Connected business insights")
-        for item in build_key_insights(df, target, best_name):
-            st.markdown(f"- {item}")
-
-    return results_df, best_name
-
+    except Exception as e:
+        st.error(f"Technical Mode failed: {e}")
+        st.exception(e)
+        return None, None
 
 # =========================================================
 # FORECASTING
@@ -6033,39 +5547,27 @@ def reduce_training_size(X: pd.DataFrame, y: pd.Series, task_type: str, max_rows
     sampled_idx = X.sample(n=max_rows, random_state=42).index
     return X.loc[sampled_idx], y.loc[sampled_idx]
 
-
 def train_models(df: pd.DataFrame, target: str, selected_models=None, enable_feature_selection=True):
-    cleaned_data, removed_info = prepare_modeling_dataset(df, target)
+    cleaned_df, removed_info = prepare_modeling_dataset(df, target)
+    data = cleaned_df.dropna(subset=[target]).copy()
 
-    if cleaned_data.empty:
-        raise ValueError("No usable rows remain for modeling.")
+    if data.empty:
+        raise ValueError("No usable rows after removing missing target.")
 
-    if len(cleaned_data) < 10:
+    if len(data) < 10:
         raise ValueError("Dataset too small for modeling.")
 
-    X_raw = cleaned_data.drop(columns=[target]).copy()
-    y = cleaned_data[target].copy()
+    X_raw = data.drop(columns=[target])
+    y = data[target]
 
     task_type = infer_task_type(y)
-
-    if task_type == "regression":
-        y = safe_numeric(y)
-        valid_mask = y.notna()
-        X_raw = X_raw.loc[valid_mask].copy()
-        y = y.loc[valid_mask].copy()
-
-    if X_raw.empty or len(y) == 0:
-        raise ValueError("No usable data remains after target cleaning.")
-
-    X_raw, y = reduce_training_size(X_raw, y, task_type, max_rows=120000)
 
     preprocessor, numeric_features, categorical_features, X = build_preprocessor(X_raw)
 
     if X.shape[1] == 0:
         raise ValueError("No usable predictors.")
 
-    is_large_data = len(X) > 50000 or len(categorical_features) > 15 or X.shape[1] > 60
-    models = model_bank(task_type, is_large_data=is_large_data)
+    models = model_bank(task_type)
 
     if selected_models:
         models = {k: v for k, v in models.items() if k in selected_models}
@@ -6073,15 +5575,19 @@ def train_models(df: pd.DataFrame, target: str, selected_models=None, enable_fea
     if not models:
         raise ValueError("No models selected.")
 
+    y_clean = y.dropna()
+
     stratify = None
     if task_type == "classification":
-        vc = y.value_counts(dropna=True)
-        if len(vc) > 1 and vc.min() >= 2:
-            stratify = y
+        vc = y_clean.value_counts()
+        if vc.min() >= 2 and len(vc) > 1:
+            stratify = y_clean
+
+    X = X.loc[y_clean.index]
 
     X_train, X_test, y_train, y_test = train_test_split(
         X,
-        y,
+        y_clean,
         test_size=0.2,
         random_state=42,
         stratify=stratify,
@@ -6091,72 +5597,48 @@ def train_models(df: pd.DataFrame, target: str, selected_models=None, enable_fea
         raise ValueError("Split failed.")
 
     preprocessor.fit(X_train)
+
     X_train_t = preprocessor.transform(X_train)
     X_test_t = preprocessor.transform(X_test)
 
+    if hasattr(X_train_t, "toarray") and X_train_t.shape[1] < 5000:
+        X_train_t = X_train_t.toarray()
+        X_test_t = X_test_t.toarray()
+
     feature_names = get_feature_names(preprocessor, numeric_features, categorical_features)
-
-    use_feature_selection = (
-        enable_feature_selection
-        and "apply_feature_selection" in globals()
-        and hasattr(X_train_t, "shape")
-        and X_train_t.shape[1] > 1
-        and X_train_t.shape[1] <= 800
-        and X_train_t.shape[0] <= 20000
-    )
-
-    if use_feature_selection:
-        try:
-            y_fs = y_train if task_type == "regression" else y_train.astype(str)
-            X_train_fs, X_test_fs, feature_names_fs = apply_feature_selection(
-                X_train_t,
-                y_fs,
-                X_test_t,
-                feature_names,
-                task_type,
-            )
-        except Exception:
-            X_train_fs, X_test_fs, feature_names_fs = X_train_t, X_test_t, feature_names
-    else:
-        X_train_fs, X_test_fs, feature_names_fs = X_train_t, X_test_t, feature_names
 
     rows = []
     fitted = {}
 
     for name, model in models.items():
         try:
-            model.fit(X_train_fs, y_train)
-            pred = model.predict(X_test_fs)
+            model.fit(X_train_t, y_train)
+            pred = model.predict(X_test_t)
 
             metric_row = evaluate_model(task_type, y_test, pred)
 
-            rows.append(
-                {
-                    "Model": name,
-                    "Recommended use": recommended_model_label(task_type, name),
-                    **metric_row,
-                }
-            )
+            rows.append({
+                "Model": name,
+                "Recommended use": recommended_model_label(task_type, name),
+                **metric_row
+            })
 
             fitted[name] = {
                 "model": model,
-                "X_train": X_train_fs,
-                "X_test": X_test_fs,
-                "y_train": y_train,
-                "y_test": y_test,
                 "pred": pred,
-                "feature_names": feature_names_fs,
+                "y_test": y_test,
+                "X_train": X_train_t,
+                "X_test": X_test_t,
+                "feature_names": feature_names,
                 "task_type": task_type,
                 "removed_info": removed_info,
             }
 
         except Exception as e:
-            rows.append(
-                {
-                    "Model": name,
-                    "Recommended use": f"Failed: {e}",
-                }
-            )
+            rows.append({
+                "Model": name,
+                "Recommended use": f"Failed: {str(e)}"
+            })
 
     results_df = pd.DataFrame(rows)
 
@@ -6168,23 +5650,21 @@ def train_models(df: pd.DataFrame, target: str, selected_models=None, enable_fea
 
     if task_type == "regression":
         success_df["rank_score"] = (
-            success_df["R2"].rank(ascending=False, method="min")
-            + success_df["MAE"].rank(ascending=True, method="min")
-            + success_df["RMSE"].rank(ascending=True, method="min")
+            success_df["R2"].rank(ascending=False)
+            + success_df["MAE"].rank(ascending=True)
+            + success_df["RMSE"].rank(ascending=True)
         )
     else:
         success_df["rank_score"] = (
-            success_df["F1"].rank(ascending=False, method="min")
-            + success_df["Accuracy"].rank(ascending=False, method="min")
-            + success_df["Precision"].rank(ascending=False, method="min")
-            + success_df["Recall"].rank(ascending=False, method="min")
+            success_df["F1"].rank(ascending=False)
+            + success_df["Accuracy"].rank(ascending=False)
         )
 
-    success_df = success_df.sort_values("rank_score").reset_index(drop=True)
-    best_name = success_df.loc[0, "Model"]
+    success_df = success_df.sort_values("rank_score")
+    best_name = success_df.iloc[0]["Model"]
 
     return task_type, results_df, best_name, fitted[best_name]
-    
+
 # =========================================================
 # FORECASTING
 # =========================================================
