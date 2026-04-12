@@ -6205,6 +6205,49 @@ def show_forecasting(df: pd.DataFrame):
 # EXPORTS
 # =========================================================
 
+
+def _safe_sheet_name(name: str, used_names: set[str]) -> str:
+    import re
+    name = re.sub(r"[:\\/*?\[\]]", "_", str(name)).strip()
+    name = name[:31] if name else "Sheet"
+
+    base = name
+    counter = 1
+    while name in used_names:
+        suffix = f"_{counter}"
+        name = f"{base[:31 - len(suffix)]}{suffix}"
+        counter += 1
+
+    used_names.add(name)
+    return name
+
+
+def create_excel_bytes(
+    clean_df,
+    model_df=None,
+    pivots=None,
+):
+    output = io.BytesIO()
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        used_names = set()
+
+        clean_sheet = _safe_sheet_name("cleaned_data", used_names)
+        clean_df.to_excel(writer, sheet_name=clean_sheet, index=False)
+
+        if model_df is not None and not model_df.empty:
+            model_sheet = _safe_sheet_name("model_comparison", used_names)
+            model_df.to_excel(writer, sheet_name=model_sheet, index=False)
+
+        if pivots:
+            for name, pivot_df in pivots.items():
+                if pivot_df is not None and not pivot_df.empty:
+                    sheet_name = _safe_sheet_name(name, used_names)
+                    pivot_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    output.seek(0)
+    return output.getvalue()
+
 def show_exports(df: pd.DataFrame, target: str, results_df: pd.DataFrame | None, best_model_name: str | None):
     st.subheader("Downloads and pivot builder")
 
