@@ -6205,6 +6205,7 @@ def show_forecasting(df: pd.DataFrame):
 # =========================================================
 # EXPORTS
 # =========================================================
+
 def show_exports(df: pd.DataFrame, target: str, results_df: pd.DataFrame | None, best_model_name: str | None):
     st.subheader("Downloads and pivot builder")
 
@@ -6244,7 +6245,7 @@ def show_exports(df: pd.DataFrame, target: str, results_df: pd.DataFrame | None,
     custom_pivot = create_custom_pivot(df, pivot_index, pivot_columns, value_col, aggfunc)
 
     if custom_pivot is not None:
-        st.dataframe(custom_pivot, use_container_width=True)
+        st.dataframe(custom_pivot, width="stretch")
         export_pivots["custom_pivot"] = custom_pivot
     else:
         st.info("Choose at least one row or one column field to build a pivot table.")
@@ -6252,7 +6253,7 @@ def show_exports(df: pd.DataFrame, target: str, results_df: pd.DataFrame | None,
     st.markdown("### Recommended pivots")
     for name, pivot_df in build_pivot_tables(df, target).items():
         with st.expander(name, expanded=False):
-            st.dataframe(pivot_df, use_container_width=True)
+            st.dataframe(pivot_df, width="stretch")
 
     excel_bytes = create_excel_bytes(df, results_df, export_pivots)
     st.download_button(
@@ -6262,52 +6263,69 @@ def show_exports(df: pd.DataFrame, target: str, results_df: pd.DataFrame | None,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    dataset_overview = business_summary(df, target)
-    chart_interpretations = (
-        ["The visuals focused on how the numeric target changes across categories and over time where possible."]
-        if classify_target_kind(df[target]) == "numerical"
-        else ["The visuals focused on target distribution and on which columns best separate the target groups."]
-    )
+    dataset_overview = [str(x)[:180] for x in business_summary(df, target)]
+
+    if target in df.columns and classify_target_kind(df[target]) == "numerical":
+        chart_interpretations = [
+            "The visuals focused on how the numeric target changes across categories and over time where possible."
+        ]
+    else:
+        chart_interpretations = [
+            "The visuals focused on target distribution and on which columns best separate the target groups."
+        ]
 
     model_summary = []
     if results_df is not None and not results_df.empty:
         valid_metric_rows = results_df.dropna(how="all")
         if not valid_metric_rows.empty:
             top_row = valid_metric_rows.iloc[0]
-            if "Model" in top_row:
-                model_summary.append(f"Recommended model: {top_row['Model']}.")
+
+            if "Model" in top_row and pd.notna(top_row["Model"]):
+                model_summary.append(f"Recommended model: {str(top_row['Model'])[:80]}.")
 
             metrics_only = []
             for col in results_df.columns:
                 if col in ["Model", "rank_score", "Recommended use"]:
                     continue
-                if col in top_row.index and pd.notna(top_row[col]) and isinstance(top_row[col], (int, float, np.integer, np.floating)):
+                if (
+                    col in top_row.index
+                    and pd.notna(top_row[col])
+                    and isinstance(top_row[col], (int, float, np.integer, np.floating))
+                ):
                     metrics_only.append(f"{col} = {top_row[col]:.4f}")
 
             if metrics_only:
-                model_summary.append("Top model metrics: " + ", ".join(metrics_only))
+                model_summary.append("Top model metrics: " + ", ".join(metrics_only[:6]))
 
     elif best_model_name:
-        model_summary.append(f"Recommended model: {best_model_name}.")
+        model_summary.append(f"Recommended model: {str(best_model_name)[:80]}.")
 
-    pdf_bytes = create_manager_pdf_report(
-        title="Mr Ready Executive Report",
-        dataset_overview=dataset_overview,
-        chart_interpretations=chart_interpretations,
-        model_summary=model_summary,
-        final_recommendations=[
-            "Use the business charts to explain the main pattern clearly.",
-            "Use the Excel workbook for detailed reporting and pivot review.",
-            "Use the PDF report for a simple manager level summary.",
-        ],
-    )
+    if not model_summary:
+        model_summary = ["No model summary was available."]
 
-    st.download_button(
-        "Download PDF report",
-        data=pdf_bytes,
-        file_name="mr_ready_report.pdf",
-        mime="application/pdf",
-    )
+    try:
+        pdf_bytes = create_manager_pdf_report(
+            title="Mr Ready Executive Report",
+            dataset_overview=dataset_overview,
+            chart_interpretations=chart_interpretations,
+            model_summary=model_summary,
+            final_recommendations=[
+                "Use the business charts to explain the main pattern clearly.",
+                "Use the Excel workbook for detailed reporting and pivot review.",
+                "Use the PDF report for a simple manager level summary.",
+            ],
+        )
+
+        st.download_button(
+            "Download PDF report",
+            data=pdf_bytes,
+            file_name="mr_ready_report.pdf",
+            mime="application/pdf",
+        )
+
+    except Exception as e:
+        st.warning(f"PDF export is unavailable right now: {e}")
+
     st.download_button(
         "Download cleaned CSV",
         data=df.to_csv(index=False).encode("utf-8"),
@@ -6315,7 +6333,7 @@ def show_exports(df: pd.DataFrame, target: str, results_df: pd.DataFrame | None,
         mime="text/csv",
     )
 
-    # =========================================================
+# =========================================================
 # MAIN
 # =========================================================
 def main():
