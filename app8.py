@@ -3318,6 +3318,122 @@ def advanced_model_improving_tips(best_row: pd.Series, results_df: pd.DataFrame,
 
     return list(dict.fromkeys(tips))[:5]
 
+
+def model_improving_tips(
+    task_type,
+    best_model_name,
+    results_df=None,
+    y_true=None,
+    y_pred=None,
+):
+    if task_type == "classification":
+        return [
+            f"The current best model is {best_model_name}. Compare it with the next best model to check whether the ranking is stable.",
+            "Use the confusion matrix to identify which classes are getting mixed up most often.",
+            "If one class matters more, tune the model toward higher recall or higher precision for that class.",
+            "If class probabilities are available, adjust the classification threshold instead of relying only on the default cutoff.",
+        ]
+
+    tips = []
+
+    r2_val = None
+    mae_val = None
+    rmse_val = None
+
+    if results_df is not None and not results_df.empty and "Model" in results_df.columns:
+        row = results_df[results_df["Model"] == best_model_name]
+        if not row.empty:
+            row = row.iloc[0]
+            r2_val = row["R2"] if "R2" in row and pd.notna(row["R2"]) else None
+            mae_val = row["MAE"] if "MAE" in row and pd.notna(row["MAE"]) else None
+            rmse_val = row["RMSE"] if "RMSE" in row and pd.notna(row["RMSE"]) else None
+
+    residuals = None
+    outlier_ratio = None
+    residual_spread_ratio = None
+    bias = None
+
+    if y_true is not None and y_pred is not None:
+        y_true = pd.Series(y_true).reset_index(drop=True)
+        y_pred = pd.Series(y_pred).reset_index(drop=True)
+
+        if len(y_true) > 0 and len(y_true) == len(y_pred):
+            residuals = y_true - y_pred
+            abs_scale = max(float(np.abs(y_true).median()), 1e-6)
+            residual_spread_ratio = float(residuals.std() / abs_scale) if len(residuals) > 1 else 0.0
+            bias = float(residuals.mean())
+
+            q1 = residuals.quantile(0.25)
+            q3 = residuals.quantile(0.75)
+            iqr = q3 - q1
+            lower = q1 - 1.5 * iqr
+            upper = q3 + 1.5 * iqr
+
+            if iqr > 0:
+                outlier_ratio = float(((residuals < lower) | (residuals > upper)).mean())
+
+    if r2_val is not None:
+        if r2_val < 0.10:
+            tips.append(
+                f"The model shows very low explanatory power with R² = {r2_val:.3f}, which means it is not capturing meaningful patterns in the data. "
+                f"The current features may be weak, noisy, or not business-relevant, so start by cleaning the data and removing irrelevant or identifier-like columns."
+            )
+        elif r2_val < 0.30:
+            tips.append(
+                f"The model explains only a limited share of the variation with R² = {r2_val:.3f}. "
+                f"There is some signal, but stronger feature engineering is likely needed."
+            )
+        else:
+            tips.append(
+                f"The model captures a reasonable amount of signal with R² = {r2_val:.3f}, but there is still room to improve feature quality and model fit."
+            )
+
+    if outlier_ratio is not None:
+        if outlier_ratio > 0.05:
+            tips.append(
+                f"The residual plot shows wide and uneven errors with several extreme outliers. "
+                f"About {outlier_ratio * 100:.1f}% of residuals look unusual, so removing, capping, or separately handling extreme values could improve model stability."
+            )
+        elif residual_spread_ratio is not None and residual_spread_ratio > 0.50:
+            tips.append(
+                "The residual errors are widely spread even without a large outlier share. "
+                "This suggests unstable predictions and weak fit, so target cleaning and better feature construction should come before more model tuning."
+            )
+
+    if r2_val is not None and r2_val < 0.20:
+        tips.append(
+            "The model may be relying on weak or noisy features. "
+            "Focus on meaningful business variables and aggregated metrics, such as grouped totals, country-level summaries, time-based summaries, or quantity-driven features, instead of raw row-level fields."
+        )
+
+    if results_df is not None and not results_df.empty and "R2" in results_df.columns:
+        valid_r2 = pd.to_numeric(results_df["R2"], errors="coerce").dropna()
+        if not valid_r2.empty and valid_r2.max() < 0.20:
+            tips.append(
+                "Since even the better models are performing poorly, the main problem is likely feature quality or preprocessing rather than model choice alone. "
+                "This looks more like an underfitting or data-preparation issue than a simple tuning issue."
+            )
+        elif valid_r2.nunique() > 1:
+            tips.append(
+                f"The current best model is {best_model_name}. "
+                f"Compare it with the next best model and then tune only after confirming the data and feature set are strong enough."
+            )
+    else:
+        tips.append(
+            f"The current best model is {best_model_name}. "
+            f"Use it as the baseline, but focus first on data quality, outliers, and better feature engineering."
+        )
+
+    if not tips:
+        tips = [
+            f"The current best model is {best_model_name}. Review fit quality before tuning.",
+            "Check whether the model is using meaningful predictors or mostly noisy row-level fields.",
+            "Review residual spread and outliers before trying more complex models.",
+            "If simple and tree-based models both struggle, improve features first.",
+        ]
+
+    return tips[:4]
+
 def show_modeling(df: pd.DataFrame, target: str, business_mode: bool):
     try:
         if target is None or target not in df.columns:
