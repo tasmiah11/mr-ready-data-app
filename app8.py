@@ -48,14 +48,22 @@ from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=2)
 def load_large_file(file_bytes: bytes, file_name: str):
     ext = file_name.lower().split(".")[-1]
-
     bio = io.BytesIO(file_bytes)
 
     if ext == "csv":
         return pd.read_csv(bio, low_memory=False)
 
-    elif ext in ["xlsx", "xls"]:
+    elif ext == "xlsx":
         return pd.read_excel(bio, engine="openpyxl")
+
+    elif ext == "xlsm":
+        return pd.read_excel(bio, engine="openpyxl")
+
+    elif ext == "xls":
+        return pd.read_excel(bio, engine="xlrd")
+
+    elif ext == "xlsb":
+        return pd.read_excel(bio, engine="pyxlsb")
 
     elif ext == "parquet":
         return pd.read_parquet(bio)
