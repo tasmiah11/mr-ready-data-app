@@ -2232,16 +2232,16 @@ def model_bank(task_type: str):
 
 
 def train_models(df: pd.DataFrame, target: str, selected_models=None, enable_feature_selection=True):
-    data = df.dropna(subset=[target]).copy()
+    cleaned_data, removed_info = prepare_modeling_dataset(df, target)
 
-    if data.empty:
-        raise ValueError("No usable rows after removing missing target.")
+    if cleaned_data.empty:
+        raise ValueError("No usable rows remain for modeling.")
 
-    if len(data) < 10:
+    if len(cleaned_data) < 10:
         raise ValueError("Dataset too small for modeling.")
 
-    X_raw = data.drop(columns=[target])
-    y = data[target]
+    X_raw = cleaned_data.drop(columns=[target]).copy()
+    y = cleaned_data[target].copy()
 
     task_type = infer_task_type(y)
 
@@ -2250,7 +2250,8 @@ def train_models(df: pd.DataFrame, target: str, selected_models=None, enable_fea
     if X.shape[1] == 0:
         raise ValueError("No usable predictors.")
 
-    models = model_bank(task_type)
+    is_large_data = len(cleaned_data) > 50000
+    models = model_bank(task_type, is_large_data=is_large_data)
 
     if selected_models:
         models = {k: v for k, v in models.items() if k in selected_models}
@@ -2258,20 +2259,25 @@ def train_models(df: pd.DataFrame, target: str, selected_models=None, enable_fea
     if not models:
         raise ValueError("No models selected.")
 
-    # Clean target for split
     y_clean = y.dropna()
 
-    # Stratify safely
     stratify = None
     if task_type == "classification":
         vc = y_clean.value_counts()
-        if vc.min() >= 2 and len(vc) > 1:
+        if len(vc) > 1 and vc.min() >= 2:
             stratify = y_clean
 
     X = X.loc[y_clean.index]
 
+    if len(X) > 120000:
+        X, y_clean = reduce_training_size(X, y_clean, task_type, max_rows=120000)
+
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y_clean, test_size=0.2, random_state=42, stratify=stratify
+        X,
+        y_clean,
+        test_size=0.2,
+        random_state=42,
+        stratify=stratify.loc[X.index] if stratify is not None else None,
     )
 
     if X_train.empty or X_test.empty:
@@ -2282,7 +2288,6 @@ def train_models(df: pd.DataFrame, target: str, selected_models=None, enable_fea
     X_train_t = preprocessor.transform(X_train)
     X_test_t = preprocessor.transform(X_test)
 
-    # Avoid huge dense conversion
     if hasattr(X_train_t, "toarray") and X_train_t.shape[1] < 5000:
         X_train_t = X_train_t.toarray()
         X_test_t = X_test_t.toarray()
@@ -2309,8 +2314,11 @@ def train_models(df: pd.DataFrame, target: str, selected_models=None, enable_fea
                 "model": model,
                 "pred": pred,
                 "y_test": y_test,
+                "X_train": X_train_t,
+                "X_test": X_test_t,
                 "feature_names": feature_names,
                 "task_type": task_type,
+                "removed_info": removed_info,
             }
 
         except Exception as e:
@@ -2322,7 +2330,7 @@ def train_models(df: pd.DataFrame, target: str, selected_models=None, enable_fea
     results_df = pd.DataFrame(rows)
 
     metric_cols = ["R2", "MAE", "RMSE"] if task_type == "regression" else ["Accuracy", "Precision", "Recall", "F1"]
-    success_df = results_df.dropna(subset=[c for c in metric_cols if c in results_df.columns], how="all")
+    success_df = results_df.dropna(subset=[c for c in metric_cols if c in results_df.columns], how="all").copy()
 
     if success_df.empty:
         raise ValueError("All models failed.")
@@ -2340,131 +2348,10 @@ def train_models(df: pd.DataFrame, target: str, selected_models=None, enable_fea
         )
 
     success_df = success_df.sort_values("rank_score")
-
     best_name = success_df.iloc[0]["Model"]
 
     return task_type, results_df, best_name, fitted[best_name]
 
-
-def model_improving_tips(
-    task_type,
-    best_model_name,
-    results_df=None,
-    y_true=None,
-    y_pred=None,
-):
-    if task_type == "classification":
-        return [
-            f"The current best model is {best_model_name}. Compare it with the next best model to check whether the ranking is stable.",
-            "Use the confusion matrix to identify which classes are getting mixed up most often.",
-            "If one class matters more, tune the model toward higher recall or higher precision for that class.",
-            "If class probabilities are available, adjust the classification threshold instead of relying only on the default cutoff.",
-        ]
-
-    tips = []
-
-    r2_val = None
-    mae_val = None
-    rmse_val = None
-
-    if results_df is not None and not results_df.empty and "Model" in results_df.columns:
-        row = results_df[results_df["Model"] == best_model_name]
-        if not row.empty:
-            row = row.iloc[0]
-            r2_val = row["R2"] if "R2" in row and pd.notna(row["R2"]) else None
-            mae_val = row["MAE"] if "MAE" in row and pd.notna(row["MAE"]) else None
-            rmse_val = row["RMSE"] if "RMSE" in row and pd.notna(row["RMSE"]) else None
-
-    residuals = None
-    outlier_ratio = None
-    residual_spread_ratio = None
-    bias = None
-
-    if y_true is not None and y_pred is not None:
-        y_true = pd.Series(y_true).reset_index(drop=True)
-        y_pred = pd.Series(y_pred).reset_index(drop=True)
-
-        if len(y_true) > 0 and len(y_true) == len(y_pred):
-            residuals = y_true - y_pred
-            abs_scale = max(float(np.abs(y_true).median()), 1e-6)
-            residual_spread_ratio = float(residuals.std() / abs_scale) if len(residuals) > 1 else 0.0
-            bias = float(residuals.mean())
-
-            q1 = residuals.quantile(0.25)
-            q3 = residuals.quantile(0.75)
-            iqr = q3 - q1
-            lower = q1 - 1.5 * iqr
-            upper = q3 + 1.5 * iqr
-
-            if iqr > 0:
-                outlier_ratio = float(((residuals < lower) | (residuals > upper)).mean())
-
-    # 1. Data problem
-    if r2_val is not None:
-        if r2_val < 0.10:
-            tips.append(
-                f"The model shows very low explanatory power with R² = {r2_val:.3f}, which means it is not capturing meaningful patterns in the data. "
-                f"The current features may be weak, noisy, or not business-relevant, so start by cleaning the data and removing irrelevant or identifier-like columns."
-            )
-        elif r2_val < 0.30:
-            tips.append(
-                f"The model explains only a limited share of the variation with R² = {r2_val:.3f}. "
-                f"There is some signal, but stronger feature engineering is likely needed."
-            )
-        else:
-            tips.append(
-                f"The model captures a reasonable amount of signal with R² = {r2_val:.3f}, but there is still room to improve feature quality and model fit."
-            )
-
-    # 2. Outliers
-    if outlier_ratio is not None:
-        if outlier_ratio > 0.05:
-            tips.append(
-                f"The residual plot shows wide and uneven errors with several extreme outliers. "
-                f"About {outlier_ratio * 100:.1f}% of residuals look unusual, so removing, capping, or separately handling extreme values could improve model stability."
-            )
-        elif residual_spread_ratio is not None and residual_spread_ratio > 0.50:
-            tips.append(
-                "The residual errors are widely spread even without a large outlier share. "
-                "This suggests unstable predictions and weak fit, so target cleaning and better feature construction should come before more model tuning."
-            )
-
-    # 3. Feature issue
-    if r2_val is not None and r2_val < 0.20:
-        tips.append(
-            "The model may be relying on weak or noisy features. "
-            "Focus on meaningful business variables and aggregated metrics, such as grouped totals, country-level summaries, time-based summaries, or quantity-driven features, instead of raw row-level fields."
-        )
-
-    # 4. Model limitation
-    if results_df is not None and not results_df.empty and "R2" in results_df.columns:
-        valid_r2 = pd.to_numeric(results_df["R2"], errors="coerce").dropna()
-        if not valid_r2.empty and valid_r2.max() < 0.20:
-            tips.append(
-                "Since even the better models are performing poorly, the main problem is likely feature quality or preprocessing rather than model choice alone. "
-                "This looks more like an underfitting or data-preparation issue than a simple tuning issue."
-            )
-        elif valid_r2.nunique() > 1:
-            tips.append(
-                f"The current best model is {best_model_name}. "
-                f"Compare it with the next best model and then tune only after confirming the data and feature set are strong enough."
-            )
-    else:
-        tips.append(
-            f"The current best model is {best_model_name}. "
-            f"Use it as the baseline, but focus first on data quality, outliers, and better feature engineering."
-        )
-
-    # fallback
-    if not tips:
-        tips = [
-            f"The current best model is {best_model_name}. Review fit quality before tuning.",
-            "Check whether the model is using meaningful predictors or mostly noisy row-level fields.",
-            "Review residual spread and outliers before trying more complex models.",
-            "If simple and tree-based models both struggle, improve features first.",
-        ]
-
-    return tips[:4]
 
 # =========================================================
 # STATS AND TESTS
@@ -3664,7 +3551,499 @@ def show_modeling(df: pd.DataFrame, target: str, business_mode: bool):
 
         if enable_advanced:
             st.info("Advanced Modeling compares stronger models, cross validation stability, diagnostics, and explainability.")
-            st.caption("Keep advanced modeling off unless you need it. It is heavier than the basic model comparison.")
+
+            adv_models = get_advanced_models(task_type)
+            default_reg = [
+                "Linear Regression",
+                "Ridge",
+                "Random Forest Regressor",
+            ]
+            default_cls = [
+                "Logistic Regression",
+                "Random Forest Classifier",
+            ]
+
+            selected_adv_models = st.multiselect(
+                "Advanced models to compare",
+                list(adv_models.keys()),
+                default=default_reg if task_type == "regression" else default_cls,
+                key="adv_model_select",
+            )
+
+            test_size = st.slider("Test size", 0.1, 0.4, 0.2, 0.05, key="adv_test_size")
+            cv_folds = st.selectbox("CV folds", [3, 5, 10], index=0, key="adv_cv_folds")
+            random_state = st.number_input("Random state", min_value=1, value=42, step=1, key="adv_random_state")
+            enable_tuning = st.checkbox("Enable hyperparameter tuning", value=False, key="adv_enable_tuning")
+            run_advanced = st.button("Run Advanced Analysis", type="primary", key="run_advanced_analysis")
+
+            advanced_config = {
+                "target": target,
+                "task_type": task_type,
+                "selected_adv_models": tuple(selected_adv_models),
+                "test_size": float(test_size),
+                "cv_folds": int(cv_folds),
+                "random_state": int(random_state),
+                "enable_tuning": bool(enable_tuning),
+                "schema_signature": current_schema_signature,
+            }
+
+            cached_adv_config = st.session_state.get("advanced_model_config")
+            cached_adv_result = st.session_state.get("advanced_model_result")
+
+            if run_advanced:
+                pass
+            elif cached_adv_result is not None and cached_adv_config == advanced_config:
+                adv_results_df, best_adv_name, best_adv_row, best_adv_bundle, readiness, valid_adv = cached_adv_result
+            else:
+                adv_results_df, best_adv_name, best_adv_row, best_adv_bundle, readiness, valid_adv = None, None, None, None, None, None
+
+            if run_advanced:
+                work, adv_removed_info = prepare_modeling_dataset(df, target)
+
+                if work.empty:
+                    st.warning("No usable rows remain after removing leakage and missing target.")
+                    return results_df, best_name
+
+                X_raw = work.drop(columns=[target]).copy()
+                y = work[target].copy()
+
+                if task_type == "regression":
+                    y = safe_numeric(y)
+                    valid_mask = y.notna()
+                    X_raw = X_raw.loc[valid_mask].copy()
+                    y = y.loc[valid_mask].copy()
+
+                    if y.empty:
+                        st.warning("Advanced regression requires a numeric target.")
+                        return results_df, best_name
+
+                def prepare_advanced_features(frame: pd.DataFrame, reference_columns=None) -> pd.DataFrame:
+                    out = frame.copy()
+
+                    datetime_features = [c for c in out.columns if pd.api.types.is_datetime64_any_dtype(out[c])]
+                    for col in datetime_features:
+                        out[f"{col}_year"] = out[col].dt.year
+                        out[f"{col}_month"] = out[col].dt.month
+                        out[f"{col}_day"] = out[col].dt.day
+                        out[f"{col}_dayofweek"] = out[col].dt.dayofweek
+
+                    out = out.drop(columns=datetime_features, errors="ignore")
+
+                    if reference_columns is not None:
+                        out = out.reindex(columns=reference_columns, fill_value=np.nan)
+
+                    return out
+
+                X_ready = prepare_advanced_features(X_raw)
+
+                constant_cols_ready = [
+                    c for c in X_ready.columns
+                    if X_ready[c].nunique(dropna=True) <= 1
+                ]
+                if constant_cols_ready:
+                    X_ready = X_ready.drop(columns=constant_cols_ready, errors="ignore")
+
+                if X_ready.empty or X_ready.shape[1] == 0:
+                    st.warning("No usable predictors remain for advanced modeling.")
+                    return results_df, best_name
+
+                readiness_df = X_ready.copy()
+                readiness_df[target] = y.values
+                readiness = run_data_readiness_checks(readiness_df, target)
+
+                st.markdown("### Data Readiness Check")
+                st.write({
+                    "rows": readiness["rows"],
+                    "columns": readiness["columns"],
+                    "numeric_features": readiness["numeric_count"],
+                    "categorical_features": readiness["categorical_count"],
+                    "duplicate_rows": readiness["duplicate_rows"],
+                    "constant_columns": readiness["constant_cols"][:10],
+                })
+
+                removed_total = sum(len(v) for v in adv_removed_info.values())
+                if removed_total > 0:
+                    with st.expander("Columns removed before advanced modeling", expanded=False):
+                        for k, v in adv_removed_info.items():
+                            if v:
+                                st.write({k: v[:20]})
+
+                if not readiness["missing_summary"].empty:
+                    with st.expander("Columns with missing values", expanded=False):
+                        missing_df = readiness["missing_summary"].reset_index()
+                        missing_df.columns = ["column", "missing_count"]
+                        st.dataframe(missing_df, width="stretch")
+
+                if readiness["high_corr_pairs"]:
+                    with st.expander("Highly correlated numeric features", expanded=False):
+                        corr_df = pd.DataFrame(
+                            readiness["high_corr_pairs"],
+                            columns=["Feature A", "Feature B", "Correlation"],
+                        )
+                        st.dataframe(corr_df, width="stretch")
+
+                for w in readiness["warnings"]:
+                    st.warning(w)
+
+                stratify = None
+                if task_type == "classification":
+                    vc = y.value_counts(dropna=True)
+                    if len(vc) > 1 and vc.min() >= 2:
+                        stratify = y
+
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X_ready,
+                    y,
+                    test_size=test_size,
+                    random_state=int(random_state),
+                    stratify=stratify,
+                )
+
+                adv_results = []
+                fitted_adv = {}
+                param_grids = get_advanced_param_grids(task_type)
+
+                row_count = len(X_train)
+                feature_count = X_train.shape[1]
+
+                effective_cv_folds = min(int(cv_folds), 3) if (row_count > 5000 or feature_count > 40) else int(cv_folds)
+
+                for model_name in selected_adv_models:
+                    model = adv_models[model_name]
+
+                    try:
+                        X_train_ready = X_train.copy()
+                        X_test_ready = prepare_advanced_features(X_test.copy(), reference_columns=X_train_ready.columns)
+
+                        preprocessor, _, _, _ = build_preprocessor(X_train_ready)
+
+                        pipe = Pipeline([
+                            ("preprocessor", preprocessor),
+                            ("model", model),
+                        ])
+
+                        if row_count > 6000:
+                            sample_n = min(4000, row_count)
+                            sample_idx = X_train_ready.sample(sample_n, random_state=int(random_state)).index
+                            X_cv = X_train_ready.loc[sample_idx].copy()
+                            y_cv = y_train.loc[sample_idx].copy()
+                        else:
+                            X_cv = X_train_ready
+                            y_cv = y_train
+
+                        cv_mean = np.nan
+                        cv_std = np.nan
+
+                        if enable_tuning and model_name in param_grids:
+                            scoring_name = "r2" if task_type == "regression" else "f1_weighted"
+                            search = GridSearchCV(
+                                pipe,
+                                param_grid=param_grids[model_name],
+                                cv=effective_cv_folds,
+                                scoring=scoring_name,
+                                n_jobs=1,
+                            )
+                            search.fit(X_cv, y_cv)
+                            fitted_pipe = search.best_estimator_
+                            cv_mean = float(search.best_score_)
+                            cv_std = np.nan
+
+                            if len(X_cv) != len(X_train_ready):
+                                fitted_pipe.fit(X_train_ready, y_train)
+                        else:
+                            fitted_pipe = pipe.fit(X_train_ready, y_train)
+
+                            if task_type == "regression":
+                                cv_scores = cross_val_score(
+                                    pipe,
+                                    X_cv,
+                                    y_cv,
+                                    cv=effective_cv_folds,
+                                    scoring="r2",
+                                    n_jobs=1,
+                                )
+                            else:
+                                cv_scores = cross_val_score(
+                                    pipe,
+                                    X_cv,
+                                    y_cv,
+                                    cv=effective_cv_folds,
+                                    scoring="f1_weighted",
+                                    n_jobs=1,
+                                )
+
+                            cv_mean = float(np.mean(cv_scores))
+                            cv_std = float(np.std(cv_scores))
+
+                        train_pred = fitted_pipe.predict(X_train_ready)
+                        test_pred = fitted_pipe.predict(X_test_ready)
+
+                        if task_type == "regression":
+                            train_r2 = float(metrics.r2_score(y_train, train_pred))
+                            test_r2 = float(metrics.r2_score(y_test, test_pred))
+                            mae = float(metrics.mean_absolute_error(y_test, test_pred))
+                            rmse = float(np.sqrt(metrics.mean_squared_error(y_test, test_pred)))
+
+                            overfit_gap = train_r2 - test_r2
+                            overfit_flag = "Yes" if overfit_gap > 0.15 else "No"
+                            stability_note = "Stable" if pd.isna(cv_std) or cv_std <= 0.10 else "Unstable"
+
+                            adv_results.append({
+                                "Model": model_name,
+                                "Train R2": train_r2,
+                                "Test R2": test_r2,
+                                "MAE": mae,
+                                "RMSE": rmse,
+                                "CV Mean": cv_mean,
+                                "CV Std": cv_std,
+                                "Overfitting Gap": overfit_gap,
+                                "Overfitting Flag": overfit_flag,
+                                "Stability": stability_note,
+                            })
+
+                        else:
+                            train_acc = float(metrics.accuracy_score(y_train, train_pred))
+                            test_acc = float(metrics.accuracy_score(y_test, test_pred))
+                            precision = float(metrics.precision_score(y_test, test_pred, average="weighted", zero_division=0))
+                            recall = float(metrics.recall_score(y_test, test_pred, average="weighted", zero_division=0))
+                            f1 = float(metrics.f1_score(y_test, test_pred, average="weighted", zero_division=0))
+
+                            overfit_gap = train_acc - test_acc
+                            overfit_flag = "Yes" if overfit_gap > 0.10 else "No"
+                            stability_note = "Stable" if pd.isna(cv_std) or cv_std <= 0.10 else "Unstable"
+
+                            adv_results.append({
+                                "Model": model_name,
+                                "Train Accuracy": train_acc,
+                                "Test Accuracy": test_acc,
+                                "Precision": precision,
+                                "Recall": recall,
+                                "F1": f1,
+                                "CV Mean": cv_mean,
+                                "CV Std": cv_std,
+                                "Overfitting Gap": overfit_gap,
+                                "Overfitting Flag": overfit_flag,
+                                "Stability": stability_note,
+                            })
+
+                        fitted_adv[model_name] = {
+                            "pipeline": fitted_pipe,
+                            "y_test": y_test,
+                            "pred": test_pred,
+                            "X_train": X_train_ready,
+                            "X_test": X_test_ready,
+                        }
+
+                    except Exception as e:
+                        if task_type == "regression":
+                            adv_results.append({
+                                "Model": model_name,
+                                "Train R2": np.nan,
+                                "Test R2": np.nan,
+                                "MAE": np.nan,
+                                "RMSE": np.nan,
+                                "CV Mean": np.nan,
+                                "CV Std": np.nan,
+                                "Overfitting Gap": np.nan,
+                                "Overfitting Flag": f"Failed: {e}",
+                                "Stability": "Unknown",
+                            })
+                        else:
+                            adv_results.append({
+                                "Model": model_name,
+                                "Train Accuracy": np.nan,
+                                "Test Accuracy": np.nan,
+                                "Precision": np.nan,
+                                "Recall": np.nan,
+                                "F1": np.nan,
+                                "CV Mean": np.nan,
+                                "CV Std": np.nan,
+                                "Overfitting Gap": np.nan,
+                                "Overfitting Flag": f"Failed: {e}",
+                                "Stability": "Unknown",
+                            })
+
+                adv_results_df = pd.DataFrame(adv_results)
+
+                valid_cols = ["CV Mean"]
+                valid_cols.append("RMSE" if task_type == "regression" else "F1")
+                valid_adv = adv_results_df.dropna(subset=valid_cols, how="any").copy()
+
+                if valid_adv.empty:
+                    best_adv_name, best_adv_row, best_adv_bundle = None, None, None
+                else:
+                    best_adv_name = select_best_advanced_model(valid_adv, task_type)
+                    best_adv_row = valid_adv[valid_adv["Model"] == best_adv_name].iloc[0]
+                    best_adv_bundle = fitted_adv[best_adv_name]
+
+                st.session_state["advanced_model_config"] = advanced_config
+                st.session_state["advanced_model_result"] = (
+                    adv_results_df,
+                    best_adv_name,
+                    best_adv_row,
+                    best_adv_bundle,
+                    readiness,
+                    valid_adv,
+                )
+
+            if 'readiness' in locals() and readiness is not None:
+                st.markdown("### Model Comparison")
+                st.dataframe(adv_results_df, width="stretch")
+
+                if best_adv_name is None:
+                    st.warning("No advanced models completed successfully.")
+                else:
+                    st.success(f"Best Model: {best_adv_name}")
+
+                    st.markdown("### Best Model Summary")
+                    if task_type == "regression":
+                        st.write({
+                            "Model": best_adv_name,
+                            "Train R2": round(float(best_adv_row["Train R2"]), 4),
+                            "Test R2": round(float(best_adv_row["Test R2"]), 4),
+                            "MAE": round(float(best_adv_row["MAE"]), 4),
+                            "RMSE": round(float(best_adv_row["RMSE"]), 4),
+                            "CV Mean": round(float(best_adv_row["CV Mean"]), 4),
+                            "CV Std": None if pd.isna(best_adv_row["CV Std"]) else round(float(best_adv_row["CV Std"]), 4),
+                            "Overfitting Gap": round(float(best_adv_row["Overfitting Gap"]), 4),
+                            "Overfitting Flag": best_adv_row["Overfitting Flag"],
+                            "Stability": best_adv_row["Stability"],
+                        })
+                    else:
+                        st.write({
+                            "Model": best_adv_name,
+                            "Train Accuracy": round(float(best_adv_row["Train Accuracy"]), 4),
+                            "Test Accuracy": round(float(best_adv_row["Test Accuracy"]), 4),
+                            "Precision": round(float(best_adv_row["Precision"]), 4),
+                            "Recall": round(float(best_adv_row["Recall"]), 4),
+                            "F1": round(float(best_adv_row["F1"]), 4),
+                            "CV Mean": round(float(best_adv_row["CV Mean"]), 4),
+                            "CV Std": None if pd.isna(best_adv_row["CV Std"]) else round(float(best_adv_row["CV Std"]), 4),
+                            "Overfitting Gap": round(float(best_adv_row["Overfitting Gap"]), 4),
+                            "Overfitting Flag": best_adv_row["Overfitting Flag"],
+                            "Stability": best_adv_row["Stability"],
+                        })
+
+                    compare_df = pd.DataFrame({
+                        "Actual": pd.Series(best_adv_bundle["y_test"]).reset_index(drop=True),
+                        "Predicted": pd.Series(best_adv_bundle["pred"]).reset_index(drop=True),
+                    })
+
+                    st.markdown("### Diagnostic Plots")
+
+                    if task_type == "regression":
+                        fig, ax = plt.subplots(figsize=(7.5, 5))
+                        sns.scatterplot(data=compare_df, x="Actual", y="Predicted", ax=ax)
+                        min_val = min(compare_df["Actual"].min(), compare_df["Predicted"].min())
+                        max_val = max(compare_df["Actual"].max(), compare_df["Predicted"].max())
+                        ax.plot([min_val, max_val], [min_val, max_val])
+                        ax.set_title("Actual vs Predicted")
+                        plot_matplotlib(fig)
+
+                        residuals = compare_df["Actual"] - compare_df["Predicted"]
+                        resid_df = pd.DataFrame({
+                            "Predicted": compare_df["Predicted"],
+                            "Residual": residuals,
+                        })
+
+                        resid_fig = px.scatter(resid_df, x="Predicted", y="Residual", title="Residual Plot")
+                        resid_fig.add_hline(y=0, line_dash="dash")
+                        plot_plotly(resid_fig)
+
+                        fig, ax = plt.subplots(figsize=(7, 4))
+                        sns.histplot(residuals, kde=True, ax=ax)
+                        ax.set_title("Residual Distribution")
+                        plot_matplotlib(fig)
+
+                    else:
+                        labels = sorted(pd.Series(best_adv_bundle["y_test"]).astype(str).unique().tolist())
+                        cm = confusion_matrix(
+                            pd.Series(best_adv_bundle["y_test"]).astype(str),
+                            pd.Series(best_adv_bundle["pred"]).astype(str),
+                            labels=labels,
+                        )
+                        fig, ax = plt.subplots(figsize=(6.5, 5))
+                        sns.heatmap(cm, annot=True, fmt="d", cmap="viridis", ax=ax, xticklabels=labels, yticklabels=labels)
+                        ax.set_title("Confusion Matrix")
+                        ax.set_xlabel("Predicted")
+                        ax.set_ylabel("Actual")
+                        plot_matplotlib(fig)
+
+                        report = classification_report(
+                            best_adv_bundle["y_test"],
+                            best_adv_bundle["pred"],
+                            output_dict=True,
+                            zero_division=0,
+                        )
+                        report_df = pd.DataFrame(report).transpose().reset_index().rename(columns={"index": "class"})
+                        st.dataframe(report_df, width="stretch")
+
+                    st.markdown("### Model Explainability")
+                    try:
+                        fitted_model = best_adv_bundle["pipeline"].named_steps["model"]
+                        fitted_preprocessor = best_adv_bundle["pipeline"].named_steps["preprocessor"]
+
+                        X_train_source = best_adv_bundle["X_train"]
+                        numeric_features = X_train_source.select_dtypes(include=[np.number]).columns.tolist()
+                        categorical_features = [c for c in X_train_source.columns if c not in numeric_features]
+
+                        feature_names = get_feature_names(
+                            fitted_preprocessor,
+                            numeric_features,
+                            categorical_features,
+                        )
+
+                        if hasattr(fitted_model, "coef_"):
+                            coef_raw = np.array(fitted_model.coef_)
+
+                            if coef_raw.ndim == 1:
+                                coef_vals = coef_raw
+                            else:
+                                coef_vals = np.mean(np.abs(coef_raw), axis=0)
+
+                            feature_count = min(len(feature_names), len(coef_vals))
+
+                            exp_df = pd.DataFrame({
+                                "feature": feature_names[:feature_count],
+                                "coefficient": coef_vals[:feature_count],
+                                "abs_coefficient": np.abs(coef_vals[:feature_count]),
+                            }).sort_values("abs_coefficient", ascending=False).head(15)
+
+                            st.dataframe(exp_df, width="stretch")
+
+                            fig, ax = plt.subplots(figsize=(9, 5))
+                            sns.barplot(data=exp_df, x="abs_coefficient", y="feature", ax=ax)
+                            ax.set_title("Top Coefficients")
+                            plot_matplotlib(fig)
+
+                        elif hasattr(fitted_model, "feature_importances_"):
+                            imp_vals = np.array(fitted_model.feature_importances_)
+                            feature_count = min(len(feature_names), len(imp_vals))
+
+                            exp_df = pd.DataFrame({
+                                "feature": feature_names[:feature_count],
+                                "importance": imp_vals[:feature_count],
+                            }).sort_values("importance", ascending=False).head(15)
+
+                            st.dataframe(exp_df, width="stretch")
+
+                            fig, ax = plt.subplots(figsize=(9, 5))
+                            sns.barplot(data=exp_df, x="importance", y="feature", ax=ax)
+                            ax.set_title("Top Feature Importances")
+                            plot_matplotlib(fig)
+                        else:
+                            st.info("Feature explainability is not available for this model.")
+
+                    except Exception as e:
+                        st.warning(f"Explainability could not be generated: {e}")
+
+                    st.markdown("### Interpretation")
+                    for note in advanced_model_interpretation(best_adv_row, valid_adv, task_type):
+                        st.markdown(f"- {note}")
+
+                    st.markdown("### Improvement Tips")
+                    for tip in advanced_model_improving_tips(best_adv_row, valid_adv, readiness, task_type):
+                        st.markdown(f"- {tip}")
 
         if results_df is not None and best_name is not None:
             with st.expander("Statistical summary", expanded=False):
@@ -3717,7 +4096,6 @@ def show_modeling(df: pd.DataFrame, target: str, business_mode: bool):
         st.error(f"Technical Mode failed: {e}")
         st.exception(e)
         return None, None
-
 # =========================================================
 # FORECASTING
 # =========================================================
