@@ -4290,7 +4290,9 @@ def simple_forecast(df: pd.DataFrame, date_col: str, value_col: str, periods: in
 def _clean_pdf_text(text):
     if text is None:
         return ""
+
     text = str(text)
+
     replacements = {
         "•": "-",
         "–": "-",
@@ -4300,29 +4302,52 @@ def _clean_pdf_text(text):
         "’": "'",
         "‘": "'",
         "\u00a0": " ",
+        "\t": " ",
     }
+
     for old, new in replacements.items():
         text = text.replace(old, new)
 
     text = re.sub(r"\s+", " ", text).strip()
+
+    words = []
+    for token in text.split(" "):
+        if len(token) > 35:
+            token = " ".join(token[i:i+35] for i in range(0, len(token), 35))
+        words.append(token)
+
+    text = " ".join(words)
+
     return text.encode("latin-1", "replace").decode("latin-1")
 
 
+def _pdf_safe_width(pdf):
+    return max(10, pdf.w - pdf.l_margin - pdf.r_margin)
+
+
 def pdf_write_title(pdf, text):
+    pdf.set_x(pdf.l_margin)
     pdf.set_font("Helvetica", "B", 16)
-    pdf.multi_cell(0, 10, _clean_pdf_text(text))
+    pdf.multi_cell(_pdf_safe_width(pdf), 10, _clean_pdf_text(text))
     pdf.ln(1)
 
 
 def pdf_write_subtitle(pdf, text):
+    pdf.set_x(pdf.l_margin)
     pdf.set_font("Helvetica", "B", 13)
-    pdf.multi_cell(0, 8, _clean_pdf_text(text))
+    pdf.multi_cell(_pdf_safe_width(pdf), 8, _clean_pdf_text(text))
     pdf.ln(1)
 
 
 def pdf_write_paragraph(pdf, text):
+    pdf.set_x(pdf.l_margin)
     pdf.set_font("Helvetica", "", 11)
-    pdf.multi_cell(0, 7, _clean_pdf_text(text))
+    safe_text = _clean_pdf_text(text)
+
+    if not safe_text:
+        safe_text = "-"
+
+    pdf.multi_cell(_pdf_safe_width(pdf), 7, safe_text)
     pdf.ln(1)
 
 
@@ -4330,12 +4355,20 @@ def pdf_write_bullets(pdf, items):
     pdf.set_font("Helvetica", "", 11)
 
     if not items:
-        pdf.multi_cell(0, 7, "- No items available.")
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(_pdf_safe_width(pdf), 7, "- No items available.")
         pdf.ln(1)
         return
 
     for item in items:
-        pdf.multi_cell(0, 7, _clean_pdf_text(f"- {item}"))
+        safe_item = _clean_pdf_text(item)
+
+        if not safe_item:
+            safe_item = "No item available."
+
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(_pdf_safe_width(pdf), 7, f"- {safe_item}")
+
     pdf.ln(1)
 
 
@@ -4350,12 +4383,12 @@ def create_manager_pdf_report(title, dataset_overview, chart_interpretations, mo
 
     pdf_write_title(pdf, title)
 
+    pdf.set_x(pdf.l_margin)
     pdf.set_font("Helvetica", "", 10)
-    pdf.cell(
-        0,
+    pdf.multi_cell(
+        _pdf_safe_width(pdf),
         7,
         _clean_pdf_text(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"),
-        ln=1,
     )
     pdf.ln(2)
 
@@ -4363,65 +4396,31 @@ def create_manager_pdf_report(title, dataset_overview, chart_interpretations, mo
         ("1. Dataset Overview", dataset_overview),
         ("2. Visual Insights", chart_interpretations),
         ("3. Model Summary", model_summary),
-        ("4. Business Interpretation", [
-            "This report summarizes the main patterns in simple business language.",
-            "It highlights what matters most and what action can be taken next.",
-        ]),
+        (
+            "4. Business Interpretation",
+            [
+                "This report summarizes the main patterns in simple business language.",
+                "It highlights what matters most and what action can be taken next.",
+            ],
+        ),
         ("5. Recommendations", final_recommendations),
     ]
 
     for section_title, items in sections:
         pdf_write_subtitle(pdf, section_title)
+
         if isinstance(items, str):
             pdf_write_paragraph(pdf, items)
         else:
-            pdf_write_bullets(pdf, items)
+            safe_items = []
+            for x in items:
+                txt = _clean_pdf_text(x)
+                if txt:
+                    safe_items.append(txt[:300])
+            pdf_write_bullets(pdf, safe_items)
 
     output = pdf.output(dest="S")
     return output.encode("latin-1", errors="replace") if isinstance(output, str) else bytes(output)
-
-
-def _safe_sheet_name(name: str, used_names: set[str]) -> str:
-    name = re.sub(r"[:\\/*?\[\]]", "_", str(name)).strip()
-    name = name[:31] if name else "Sheet"
-
-    base = name
-    counter = 1
-    while name in used_names:
-        suffix = f"_{counter}"
-        name = f"{base[:31 - len(suffix)]}{suffix}"
-        counter += 1
-
-    used_names.add(name)
-    return name
-
-
-def create_excel_bytes(
-    clean_df: pd.DataFrame,
-    model_df: pd.DataFrame | None = None,
-    pivots: dict[str, pd.DataFrame] | None = None,
-):
-    output = io.BytesIO()
-
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        used_names = set()
-
-        clean_sheet = _safe_sheet_name("cleaned_data", used_names)
-        clean_df.to_excel(writer, sheet_name=clean_sheet, index=False)
-
-        if model_df is not None and not model_df.empty:
-            model_sheet = _safe_sheet_name("model_comparison", used_names)
-            model_df.to_excel(writer, sheet_name=model_sheet, index=False)
-
-        if pivots:
-            for name, pivot_df in pivots.items():
-                if pivot_df is not None and not pivot_df.empty:
-                    sheet_name = _safe_sheet_name(name, used_names)
-                    pivot_df.to_excel(writer, sheet_name=sheet_name, index=False)
-
-    output.seek(0)
-    return output.getvalue()
-
 
 # =========================================================
 # UI SECTIONS
