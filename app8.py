@@ -3213,74 +3213,248 @@ def select_best_advanced_model(df: pd.DataFrame, task_type: str) -> str:
     return work.iloc[0]["Model"]
 
 
-def advanced_model_interpretation(best_row: pd.Series, results_df: pd.DataFrame, task_type: str) -> list[str]:
+def advanced_model_interpretation(
+    best_row: pd.Series,
+    results_df: pd.DataFrame,
+    task_type: str,
+    y_true=None,
+    readiness: dict | None = None,
+) -> list[str]:
     notes = []
+    readiness = readiness or {}
+
+    if best_row is None or results_df is None or results_df.empty:
+        return ["No advanced model interpretation is available."]
+
+    model_name = str(best_row.get("Model", "Best model"))
 
     if task_type == "regression":
         test_r2 = best_row.get("Test R2", np.nan)
         train_r2 = best_row.get("Train R2", np.nan)
         cv_mean = best_row.get("CV Mean", np.nan)
+        rmse = best_row.get("RMSE", np.nan)
+        mae = best_row.get("MAE", np.nan)
+        gap = best_row.get("Overfitting Gap", np.nan)
 
-        if pd.notna(test_r2) and pd.notna(cv_mean):
-            if test_r2 >= 0.7 and cv_mean >= 0.6:
-                notes.append("The best model shows strong predictive performance and generalizes reasonably well.")
-            elif test_r2 >= 0.4:
-                notes.append("The model captures a meaningful signal, but performance is still moderate.")
+        if pd.notna(test_r2):
+            if test_r2 >= 0.85:
+                notes.append(
+                    f"{model_name} explains a large share of target variation with test R² of {test_r2:.3f}, so predictive signal looks strong for this dataset."
+                )
+            elif test_r2 >= 0.65:
+                notes.append(
+                    f"{model_name} reaches test R² of {test_r2:.3f}, which indicates a useful but not fully strong regression fit."
+                )
+            elif test_r2 >= 0.40:
+                notes.append(
+                    f"{model_name} reaches test R² of {test_r2:.3f}, so the dataset contains only moderate predictive structure."
+                )
             else:
-                notes.append("The model performance is weak, which suggests limited predictive signal in the current features.")
+                notes.append(
+                    f"{model_name} reaches only test R² of {test_r2:.3f}, which suggests weak signal or missing important predictors."
+                )
 
-        if pd.notna(train_r2) and pd.notna(test_r2):
-            if (train_r2 - test_r2) > 0.15:
-                notes.append("The gap between training and test performance suggests overfitting.")
+        if pd.notna(train_r2) and pd.notna(gap):
+            if gap > 0.15:
+                notes.append(
+                    f"The train to test gap is {gap:.3f}, which is large enough to suggest overfitting."
+                )
+            elif gap > 0.07:
+                notes.append(
+                    f"The train to test gap is {gap:.3f}, so some overfitting may be present."
+                )
+            elif gap >= 0:
+                notes.append(
+                    f"The train to test gap is only {gap:.3f}, so generalization looks fairly stable."
+                )
+
+        if pd.notna(cv_mean):
+            if pd.notna(test_r2):
+                diff = abs(cv_mean - test_r2)
+                if diff <= 0.05:
+                    notes.append(
+                        f"Cross validation mean of {cv_mean:.3f} is close to the test score, which supports result stability across folds."
+                    )
+                else:
+                    notes.append(
+                        f"Cross validation mean of {cv_mean:.3f} differs noticeably from the test score, so split sensitivity may be present."
+                    )
             else:
-                notes.append("The training and test scores are reasonably close, which supports more stable generalization.")
+                notes.append(
+                    f"Cross validation mean is {cv_mean:.3f}, which helps judge how stable this result is across folds."
+                )
+
+        if pd.notna(rmse) and pd.notna(mae):
+            if rmse <= mae * 1.3:
+                notes.append(
+                    f"RMSE ({rmse:.3f}) stays fairly close to MAE ({mae:.3f}), so extreme prediction errors do not appear to dominate."
+                )
+            else:
+                notes.append(
+                    f"RMSE ({rmse:.3f}) is much higher than MAE ({mae:.3f}), which suggests some larger individual errors are still pulling performance down."
+                )
 
         linear_models = results_df[results_df["Model"].isin(["Linear Regression", "Ridge", "Lasso"])]
         tree_models = results_df[results_df["Model"].isin(["Random Forest Regressor", "Gradient Boosting Regressor"])]
 
         if not linear_models.empty and not tree_models.empty:
-            if tree_models["CV Mean"].max() > linear_models["CV Mean"].max() + 0.05:
-                notes.append("Tree based models outperform linear models, which suggests likely non linear relationships.")
-            elif linear_models["CV Mean"].max() >= tree_models["CV Mean"].max():
-                notes.append("Linear models are competitive here, so the relationships may be reasonably structured without heavy non linearity.")
+            lin_cv = pd.to_numeric(linear_models["CV Mean"], errors="coerce").max()
+            tree_cv = pd.to_numeric(tree_models["CV Mean"], errors="coerce").max()
 
-        if "Ridge" in results_df["Model"].values and "Linear Regression" in results_df["Model"].values:
-            ridge_cv = results_df.loc[results_df["Model"] == "Ridge", "CV Mean"].max()
-            linear_cv = results_df.loc[results_df["Model"] == "Linear Regression", "CV Mean"].max()
-            if pd.notna(ridge_cv) and pd.notna(linear_cv) and ridge_cv > linear_cv:
-                notes.append("Ridge performed better than standard linear regression, which suggests regularization improved stability.")
+            if pd.notna(lin_cv) and pd.notna(tree_cv):
+                if tree_cv > lin_cv + 0.05:
+                    notes.append(
+                        "Tree based regressors are clearly ahead of linear models here, which suggests non linear relationships or interaction effects in the dataset."
+                    )
+                elif lin_cv >= tree_cv - 0.02:
+                    notes.append(
+                        "Linear models remain competitive here, so the underlying relationships may be reasonably structured without heavy non linearity."
+                    )
 
-        return notes[:4]
+        if len(results_df) > 1 and "Test R2" in results_df.columns:
+            tmp = results_df.dropna(subset=["Test R2"]).sort_values("Test R2", ascending=False)
+            if len(tmp) > 1:
+                margin = float(tmp.iloc[0]["Test R2"] - tmp.iloc[1]["Test R2"])
+                if margin < 0.03:
+                    notes.append(
+                        f"The top regression models are very close, with only a {margin:.3f} gap, so model ranking is not strongly separated."
+                    )
+                elif margin >= 0.08:
+                    notes.append(
+                        f"The best model has a meaningful lead of {margin:.3f} over the next model, so model choice matters more for this dataset."
+                    )
 
-    test_f1 = best_row.get("F1", np.nan)
-    train_acc = best_row.get("Train Accuracy", np.nan)
+        if readiness.get("high_corr_pairs"):
+            notes.append(
+                "Highly correlated numeric predictors are present, so some coefficient or effect estimates may be less stable than they look."
+            )
+
+        return list(dict.fromkeys(notes))[:5]
+
     test_acc = best_row.get("Test Accuracy", np.nan)
+    train_acc = best_row.get("Train Accuracy", np.nan)
+    f1 = best_row.get("F1", np.nan)
+    precision = best_row.get("Precision", np.nan)
+    recall = best_row.get("Recall", np.nan)
     cv_mean = best_row.get("CV Mean", np.nan)
+    gap = best_row.get("Overfitting Gap", np.nan)
 
-    if pd.notna(test_f1) and pd.notna(cv_mean):
-        if test_f1 >= 0.85 and cv_mean >= 0.8:
-            notes.append("The best classifier shows strong predictive quality and stable validation performance.")
-        elif test_f1 >= 0.7:
-            notes.append("The classifier performs reasonably well, though there is still room to improve class separation.")
+    if pd.notna(f1):
+        if f1 >= 0.90:
+            notes.append(
+                f"{model_name} achieves F1 of {f1:.3f}, which indicates very strong class separation on this dataset."
+            )
+        elif f1 >= 0.80:
+            notes.append(
+                f"{model_name} achieves F1 of {f1:.3f}, showing strong classification performance."
+            )
+        elif f1 >= 0.70:
+            notes.append(
+                f"{model_name} achieves F1 of {f1:.3f}, so the classifier is usable but class separation is only moderate."
+            )
         else:
-            notes.append("Classification performance is limited, which suggests weak signal or class overlap in the current features.")
+            notes.append(
+                f"{model_name} achieves only F1 of {f1:.3f}, which suggests class overlap, weak predictors, or target noise."
+            )
 
-    if pd.notna(train_acc) and pd.notna(test_acc):
-        if (train_acc - test_acc) > 0.10:
-            notes.append("The gap between training and test accuracy suggests overfitting.")
+    if pd.notna(train_acc) and pd.notna(test_acc) and pd.notna(gap):
+        if gap > 0.10:
+            notes.append(
+                f"The train to test accuracy gap is {gap:.3f}, which suggests noticeable overfitting."
+            )
+        elif gap > 0.05:
+            notes.append(
+                f"The train to test accuracy gap is {gap:.3f}, so some overfitting may be present."
+            )
         else:
-            notes.append("Training and test accuracy are fairly close, which supports more reliable generalization.")
+            notes.append(
+                f"The train to test accuracy gap is only {gap:.3f}, so generalization looks fairly stable."
+            )
+
+    if pd.notna(cv_mean):
+        if pd.notna(f1):
+            diff = abs(cv_mean - f1)
+            if diff <= 0.05:
+                notes.append(
+                    f"Cross validation mean of {cv_mean:.3f} is close to the F1 score, which supports stable classification performance."
+                )
+            else:
+                notes.append(
+                    f"Cross validation mean of {cv_mean:.3f} differs from the F1 score, so performance may vary across folds."
+                )
+        else:
+            notes.append(
+                f"Cross validation mean is {cv_mean:.3f}, which helps assess consistency across folds."
+            )
+
+    if pd.notna(precision) and pd.notna(recall):
+        balance_gap = abs(precision - recall)
+        if balance_gap <= 0.05:
+            notes.append(
+                f"Precision ({precision:.3f}) and recall ({recall:.3f}) are closely balanced, so the classifier is not heavily tilted toward one error type."
+            )
+        elif precision > recall:
+            notes.append(
+                f"Precision ({precision:.3f}) is above recall ({recall:.3f}), so the model is more conservative and misses more true cases than it mislabels."
+            )
+        else:
+            notes.append(
+                f"Recall ({recall:.3f}) is above precision ({precision:.3f}), so the model captures more true cases but also makes more false positive calls."
+            )
+
+    if y_true is not None:
+        class_dist = pd.Series(y_true).dropna().astype(str).value_counts(normalize=True)
+        if not class_dist.empty:
+            majority_share = float(class_dist.iloc[0])
+            class_count = int(class_dist.shape[0])
+
+            notes.append(f"The test target includes {class_count} visible class group(s).")
+
+            if majority_share >= 0.80:
+                notes.append(
+                    f"The largest class covers {majority_share:.1%} of the test data, so class imbalance is strong and accuracy alone can be misleading."
+                )
+            elif majority_share >= 0.65:
+                notes.append(
+                    f"The largest class covers {majority_share:.1%} of the test data, indicating some class imbalance."
+                )
 
     linear_models = results_df[results_df["Model"].isin(["Logistic Regression"])]
     tree_models = results_df[results_df["Model"].isin(["Random Forest Classifier", "Gradient Boosting Classifier"])]
 
     if not linear_models.empty and not tree_models.empty:
-        if tree_models["CV Mean"].max() > linear_models["CV Mean"].max() + 0.05:
-            notes.append("Tree based classifiers outperform logistic regression, which suggests more complex decision boundaries.")
-        else:
-            notes.append("Logistic regression remains competitive, so class separation may be reasonably structured.")
+        lin_cv = pd.to_numeric(linear_models["CV Mean"], errors="coerce").max()
+        tree_cv = pd.to_numeric(tree_models["CV Mean"], errors="coerce").max()
 
-    return notes[:4]
+        if pd.notna(lin_cv) and pd.notna(tree_cv):
+            if tree_cv > lin_cv + 0.05:
+                notes.append(
+                    "Tree based classifiers are clearly ahead of logistic regression here, which suggests more complex decision boundaries in the data."
+                )
+            elif lin_cv >= tree_cv - 0.02:
+                notes.append(
+                    "Logistic regression remains competitive here, so class separation may be reasonably structured and not purely non linear."
+                )
+
+    if len(results_df) > 1 and "F1" in results_df.columns:
+        tmp = results_df.dropna(subset=["F1"]).sort_values("F1", ascending=False)
+        if len(tmp) > 1:
+            margin = float(tmp.iloc[0]["F1"] - tmp.iloc[1]["F1"])
+            if margin < 0.03:
+                notes.append(
+                    f"The top classifiers are very close, with only a {margin:.3f} F1 gap, so ranking is not strongly separated."
+                )
+            elif margin >= 0.08:
+                notes.append(
+                    f"The best classifier leads the next model by {margin:.3f} in F1, so algorithm choice has a noticeable effect here."
+                )
+
+    if readiness.get("high_cardinality"):
+        notes.append(
+            "Some categorical predictors have high cardinality, which can make classification harder and less stable."
+        )
+
+    return list(dict.fromkeys(notes))[:6]
 
 
 def advanced_model_improving_tips(best_row: pd.Series, results_df: pd.DataFrame, readiness: dict, task_type: str) -> list[str]:
@@ -3326,7 +3500,6 @@ def advanced_model_improving_tips(best_row: pd.Series, results_df: pd.DataFrame,
 
     return list(dict.fromkeys(tips))[:5]
 
-
 def model_improving_tips(
     task_type,
     best_model_name,
@@ -3334,15 +3507,103 @@ def model_improving_tips(
     y_true=None,
     y_pred=None,
 ):
-    if task_type == "classification":
-        return [
-            f"The current best model is {best_model_name}. Compare it with the next best model to check whether the ranking is stable.",
-            "Use the confusion matrix to identify which classes are getting mixed up most often.",
-            "If one class matters more, tune the model toward higher recall or higher precision for that class.",
-            "If class probabilities are available, adjust the classification threshold instead of relying only on the default cutoff.",
-        ]
-
     tips = []
+
+    if task_type == "classification":
+        accuracy_val = None
+        precision_val = None
+        recall_val = None
+        f1_val = None
+
+        if results_df is not None and not results_df.empty and "Model" in results_df.columns:
+            row = results_df[results_df["Model"] == best_model_name]
+            if not row.empty:
+                row = row.iloc[0]
+                accuracy_val = row["Accuracy"] if "Accuracy" in row and pd.notna(row["Accuracy"]) else None
+                precision_val = row["Precision"] if "Precision" in row and pd.notna(row["Precision"]) else None
+                recall_val = row["Recall"] if "Recall" in row and pd.notna(row["Recall"]) else None
+                f1_val = row["F1"] if "F1" in row and pd.notna(row["F1"]) else None
+
+        class_balance = None
+        confusion_pairs = []
+
+        if y_true is not None and y_pred is not None:
+            y_true = pd.Series(y_true).reset_index(drop=True).astype(str)
+            y_pred = pd.Series(y_pred).reset_index(drop=True).astype(str)
+
+            if len(y_true) > 0 and len(y_true) == len(y_pred):
+                class_balance = y_true.value_counts(normalize=True)
+                labels = sorted(set(y_true.unique()).union(set(y_pred.unique())))
+                cm = confusion_matrix(y_true, y_pred, labels=labels)
+
+                for i, actual in enumerate(labels):
+                    row_sum = cm[i].sum()
+                    for j, predicted in enumerate(labels):
+                        if i != j and row_sum > 0 and cm[i, j] > 0:
+                            confusion_pairs.append(
+                                (actual, predicted, cm[i, j], cm[i, j] / row_sum)
+                            )
+
+        if f1_val is not None:
+            if f1_val < 0.65:
+                tips.append(
+                    f"F1 is only {f1_val:.3f}, so improve class-separating features before relying on more tuning. The current predictors are not separating classes strongly enough."
+                )
+            elif f1_val < 0.80:
+                tips.append(
+                    f"F1 is {f1_val:.3f}, which is usable but still leaves room for better class separation through stronger features and cleaner group definitions."
+                )
+            else:
+                tips.append(
+                    f"F1 is already {f1_val:.3f}, so the next gains will likely come from targeted threshold tuning, error analysis, and better handling of the hardest classes."
+                )
+
+        if precision_val is not None and recall_val is not None:
+            if abs(precision_val - recall_val) > 0.08:
+                if recall_val > precision_val:
+                    tips.append(
+                        f"Recall ({recall_val:.3f}) is noticeably above precision ({precision_val:.3f}), so the model is catching more true cases but also producing extra false positives."
+                    )
+                else:
+                    tips.append(
+                        f"Precision ({precision_val:.3f}) is noticeably above recall ({recall_val:.3f}), so the model is conservative and is likely missing some true cases."
+                    )
+
+        if class_balance is not None and not class_balance.empty:
+            majority_share = float(class_balance.iloc[0])
+            if majority_share >= 0.75:
+                tips.append(
+                    f"The largest class covers {majority_share:.1%} of test cases, so use class weighting, resampling, or class-specific threshold tuning instead of trusting accuracy alone."
+                )
+
+        if confusion_pairs:
+            confusion_pairs = sorted(confusion_pairs, key=lambda x: x[3], reverse=True)
+            top_actual, top_pred, _, top_ratio = confusion_pairs[0]
+            tips.append(
+                f"The most visible confusion is actual '{top_actual}' being predicted as '{top_pred}' in about {top_ratio:.1%} of that class, so inspect what features fail to separate those two groups."
+            )
+
+        if results_df is not None and not results_df.empty and "F1" in results_df.columns:
+            valid_f1 = pd.to_numeric(results_df["F1"], errors="coerce").dropna().sort_values(ascending=False)
+            if len(valid_f1) > 1:
+                margin = float(valid_f1.iloc[0] - valid_f1.iloc[1])
+                if margin < 0.02:
+                    tips.append(
+                        f"{best_model_name} is only slightly ahead of the next classifier, so model ranking is not very stable and data quality may matter more than model choice."
+                    )
+                else:
+                    tips.append(
+                        f"{best_model_name} is the current best classifier, so use it as the baseline and compare all future changes against it."
+                    )
+
+        if not tips:
+            tips = [
+                f"Use {best_model_name} as the baseline and inspect the classes with the most confusion.",
+                "Review class imbalance and threshold choice before adding more model complexity.",
+                "Improve features that separate the hardest class pairs.",
+            ]
+
+        return tips[:5]
 
     r2_val = None
     mae_val = None
@@ -3383,64 +3644,64 @@ def model_improving_tips(
     if r2_val is not None:
         if r2_val < 0.10:
             tips.append(
-                f"The model shows very low explanatory power with R² = {r2_val:.3f}, which means it is not capturing meaningful patterns in the data. "
-                f"The current features may be weak, noisy, or not business-relevant, so start by cleaning the data and removing irrelevant or identifier-like columns."
+                f"R² is only {r2_val:.3f}, so the current predictors are not explaining the target well. Improve feature relevance before trying more complex regression models."
             )
         elif r2_val < 0.30:
             tips.append(
-                f"The model explains only a limited share of the variation with R² = {r2_val:.3f}. "
-                f"There is some signal, but stronger feature engineering is likely needed."
+                f"R² is {r2_val:.3f}, which suggests limited signal. Better business-driven features and cleaner target values should come before aggressive tuning."
             )
         else:
             tips.append(
-                f"The model captures a reasonable amount of signal with R² = {r2_val:.3f}, but there is still room to improve feature quality and model fit."
+                f"R² is {r2_val:.3f}, so the model is capturing some real structure, but stronger features may still improve precision."
             )
 
     if outlier_ratio is not None:
         if outlier_ratio > 0.05:
             tips.append(
-                f"The residual plot shows wide and uneven errors with several extreme outliers. "
-                f"About {outlier_ratio * 100:.1f}% of residuals look unusual, so removing, capping, or separately handling extreme values could improve model stability."
+                f"About {outlier_ratio * 100:.1f}% of residuals look extreme, so review unusual target values and outlier-heavy rows before tuning the model further."
             )
         elif residual_spread_ratio is not None and residual_spread_ratio > 0.50:
             tips.append(
-                "The residual errors are widely spread even without a large outlier share. "
-                "This suggests unstable predictions and weak fit, so target cleaning and better feature construction should come before more model tuning."
+                "Residual spread is still wide relative to the target scale, so predictions are unstable and feature quality should be improved."
             )
 
-    if r2_val is not None and r2_val < 0.20:
+    if bias is not None:
+        if abs(bias) > max(0.05 * np.abs(pd.Series(y_true).mean()), 1e-6):
+            if bias > 0:
+                tips.append("The model tends to underpredict on average, so it may be missing some high-value drivers.")
+            else:
+                tips.append("The model tends to overpredict on average, so it may be overreacting to some predictors.")
+
+    if rmse_val is not None and mae_val is not None and rmse_val > mae_val * 1.4:
         tips.append(
-            "The model may be relying on weak or noisy features. "
-            "Focus on meaningful business variables and aggregated metrics, such as grouped totals, country-level summaries, time-based summaries, or quantity-driven features, instead of raw row-level fields."
+            f"RMSE ({rmse_val:.3f}) is much higher than MAE ({mae_val:.3f}), which suggests a smaller set of large errors. Review the rows with the biggest misses."
         )
 
     if results_df is not None and not results_df.empty and "R2" in results_df.columns:
-        valid_r2 = pd.to_numeric(results_df["R2"], errors="coerce").dropna()
+        valid_r2 = pd.to_numeric(results_df["R2"], errors="coerce").dropna().sort_values(ascending=False)
         if not valid_r2.empty and valid_r2.max() < 0.20:
             tips.append(
-                "Since even the better models are performing poorly, the main problem is likely feature quality or preprocessing rather than model choice alone. "
-                "This looks more like an underfitting or data-preparation issue than a simple tuning issue."
+                "Since all regression models are weak, the main issue is likely the feature set or target quality rather than model choice alone."
             )
-        elif valid_r2.nunique() > 1:
-            tips.append(
-                f"The current best model is {best_model_name}. "
-                f"Compare it with the next best model and then tune only after confirming the data and feature set are strong enough."
-            )
-    else:
-        tips.append(
-            f"The current best model is {best_model_name}. "
-            f"Use it as the baseline, but focus first on data quality, outliers, and better feature engineering."
-        )
+        elif len(valid_r2) > 1:
+            margin = float(valid_r2.iloc[0] - valid_r2.iloc[1])
+            if margin < 0.03:
+                tips.append(
+                    f"{best_model_name} is only slightly ahead of the next regressor, so ranking is not strongly separated and feature engineering may matter more than switching algorithms."
+                )
+            else:
+                tips.append(
+                    f"{best_model_name} is the current best regressor, so use it as the baseline while improving features and target quality."
+                )
 
     if not tips:
         tips = [
-            f"The current best model is {best_model_name}. Review fit quality before tuning.",
-            "Check whether the model is using meaningful predictors or mostly noisy row-level fields.",
-            "Review residual spread and outliers before trying more complex models.",
-            "If simple and tree-based models both struggle, improve features first.",
+            f"Use {best_model_name} as the baseline and inspect the rows with the largest errors.",
+            "Improve target quality and feature relevance before trying more complexity.",
+            "Review outliers and unstable residual patterns first.",
         ]
 
-    return tips[:4]
+    return tips[:5]
 
 def show_modeling(df: pd.DataFrame, target: str, business_mode: bool):
     try:
@@ -4162,12 +4423,14 @@ def show_modeling(df: pd.DataFrame, target: str, business_mode: bool):
                         st.warning(f"Explainability could not be generated: {e}")
 
                     st.markdown("### Interpretation")
-                    for note in advanced_model_interpretation(best_adv_row, valid_adv, task_type):
+                    for note in advanced_model_interpretation(
+                        best_adv_row,
+                        valid_adv,
+                        task_type,
+                        y_true=best_adv_bundle["y_test"],
+                        readiness=readiness,
+                    ):
                         st.markdown(f"- {note}")
-
-                    st.markdown("### Improvement Tips")
-                    for tip in advanced_model_improving_tips(best_adv_row, valid_adv, readiness, task_type):
-                        st.markdown(f"- {tip}")
 
         if results_df is not None and best_name is not None:
             with st.expander("Statistical summary", expanded=False):
@@ -4220,6 +4483,8 @@ def show_modeling(df: pd.DataFrame, target: str, business_mode: bool):
         st.error(f"Technical Mode failed: {e}")
         st.exception(e)
         return None, None
+
+
 # =========================================================
 # FORECASTING
 # =========================================================
